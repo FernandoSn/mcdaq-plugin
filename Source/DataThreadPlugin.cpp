@@ -36,6 +36,38 @@ struct PluginSettingsObject
 
 DataThreadPlugin::DataThreadPlugin (SourceNode* sn) : DataThread (sn)
 {
+#ifdef _WIN32
+
+    LOGC ("MCDAQ: Scanning for USB devices...");
+
+    constexpr int maxDevices = 16;
+
+    // Array to store the detected MCC device descriptors.
+    DaqDeviceDescriptor inventory[maxDevices] = {};
+
+    // On input, this is the capacity of the array.
+    // On output, it contains the number of detected devices.
+    int numDevices = maxDevices;
+
+    const int error = cbGetDaqDeviceInventory (
+        USB_IFC,
+        inventory,
+        &numDevices);
+
+    if (error != 0)
+    {
+        LOGE ("MCDAQ: Device discovery failed. UL error: ", error);
+        return;
+    }
+
+    LOGC ("MCDAQ: Found ", numDevices, " USB device(s).");
+
+    for (int i = 0; i < numDevices && i < maxDevices; ++i)
+    {
+        LOGC ("MCDAQ: [", i, "] ", inventory[i].ProductName, " | Unique ID: ", inventory[i].UniqueID);
+    }
+
+#endif
 }
 
 DataThreadPlugin::~DataThreadPlugin()
