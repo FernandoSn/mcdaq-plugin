@@ -1,0 +1,20 @@
+*
+!.gitignore
+
+# CMake / Visual Studio generated files
+Build/*
+!Build/.gitkeep
+.vs/
+CMakeFiles/
+CMakeCache.txt
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# Compiled binaries
+*.obj
+*.pdb
+*.dll
+*.exe
+*.lib
