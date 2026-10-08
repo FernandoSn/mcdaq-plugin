@@ -25,6 +25,10 @@
 
 #include "DataThreadPluginEditor.h"
 
+#ifdef _WIN32
+#include <cbw.h>
+#endif
+
 struct PluginSettingsObject
 {
     // Store settings for the plugin here

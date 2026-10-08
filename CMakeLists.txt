@@ -105,3 +105,48 @@ endforeach()
 #
 #target_link_libraries(${PLUGIN_NAME} ${LIBNAME_LIBRARIES})
 #target_include_directories(${PLUGIN_NAME} PRIVATE ${LIBNAME_INCLUDE_DIRS})
+
+
+
+
+# ============================================================
+# MCC Universal Library (Windows)
+# ============================================================
+
+if(WIN32)
+
+    # Directory containing cbw.h and cbw64.lib
+    set(MCC_UL_DIR
+        "C:/Users/Public/Documents/Measurement Computing/DAQ/C"
+        CACHE PATH "MCC Universal Library SDK directory"
+    )
+
+    # Locate the MCC header
+    find_path(MCC_UL_INCLUDE_DIR
+        NAMES cbw.h
+        HINTS "${MCC_UL_DIR}"
+        NO_DEFAULT_PATH
+        REQUIRED
+    )
+
+    # Locate the 64-bit import library
+    find_library(MCC_UL_LIBRARY
+        NAMES cbw64
+        HINTS "${MCC_UL_DIR}"
+        NO_DEFAULT_PATH
+        REQUIRED
+    )
+
+    # Include MCC headers
+    target_include_directories(${PLUGIN_NAME}
+        PRIVATE "${MCC_UL_INCLUDE_DIR}"
+    )
+
+    # Link against MCC Universal Library
+    target_link_libraries(${PLUGIN_NAME}
+        "${MCC_UL_LIBRARY}"
+    )
+
+    message(STATUS "MCC UL library: ${MCC_UL_LIBRARY}")
+
+endif()
