@@ -29,6 +29,8 @@
 
 class MCDAQDeviceManager;
 
+class MCDAQAcquisition;
+
 class DataThreadPlugin : public DataThread
 {
 public:
@@ -88,6 +90,8 @@ public:
 
 private:
     std::unique_ptr<MCDAQDeviceManager> deviceManager;
+    std::unique_ptr<MCDAQAcquisition> acquisition;
+    unsigned int diagnosticTicks = 0;
 
 };
 

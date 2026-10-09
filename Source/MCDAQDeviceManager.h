@@ -47,6 +47,10 @@ public:
     std::string getSelectedProductName() const;
     std::string getSelectedUniqueId() const;
 
+    // Diagnostic: read one analog input in volts.
+    // Not intended for continuous acquisition.
+    int readAnalogVoltage (int channel, float& volts) const;
+
 private:
     // Hides MCC-specific data and implementation details.
     struct Impl;

@@ -282,3 +282,41 @@ std::string
 
     return impl_->selectedUniqueId;
 }
+
+
+int MCDAQDeviceManager::readAnalogVoltage (
+    int channel,
+    float& volts) const
+{
+    volts = 0.0f;
+
+    // Both initial target boards have 8 analog inputs.
+    if (channel < 0 || channel >= 8)
+        return -2;
+
+    std::lock_guard<std::mutex> lock (reservationMutex());
+
+    const int boardNum = impl_->selectedBoardNumber;
+
+    if (boardNum < 0)
+        return -1;
+
+    unsigned short rawValue = 0;
+
+    // Both USB-204 and USB-1608FS-Plus support +/-10 V.
+    const int error = cbAIn (
+        boardNum,
+        channel,
+        BIP10VOLTS,
+        &rawValue);
+
+    if (error != 0)
+        return error;
+
+    // Convert the raw ADC reading to volts.
+    return cbToEngUnits (
+        boardNum,
+        BIP10VOLTS,
+        rawValue,
+        &volts);
+}

@@ -26,6 +26,7 @@
 
 // Include MCC-specific definitions after Open Ephys headers
 #include "MCDAQDeviceManager.h"
+#include "MCDAQAcquisition.h"
 
 struct PluginSettingsObject
 {
@@ -73,6 +74,22 @@ DataThreadPlugin::DataThreadPlugin (SourceNode* sn)
               deviceManager->getSelectedBoardNumber(),
               " | Unique ID: ",
               id.c_str());
+
+        float voltage = 0.0f;
+
+        const int readError =
+            deviceManager->readAnalogVoltage (0, voltage);
+
+        if (readError == 0)
+        {
+            LOGC ("MCDAQ: AI0 voltage = ", voltage, " V");
+        }
+        else
+        {
+            LOGE ("MCDAQ: Analog input test failed. UL error: ",
+                  readError);
+        }
+
     }
     else
     {
@@ -88,7 +105,7 @@ DataThreadPlugin::~DataThreadPlugin()
 
 bool DataThreadPlugin::foundInputSource()
 {
-    return true;
+    return deviceManager && deviceManager->getSelectedBoardNumber() >= 0;
 }
 
 void DataThreadPlugin::updateSettings (OwnedArray<ContinuousChannel>* continuousChannels,
@@ -100,18 +117,120 @@ void DataThreadPlugin::updateSettings (OwnedArray<ContinuousChannel>* continuous
 {
 }
 
+
 bool DataThreadPlugin::startAcquisition()
 {
+    LOGC ("MCDAQ DEBUG 1: Entered startAcquisition()");
+
+    if (! foundInputSource())
+    {
+        LOGE ("MCDAQ: No board selected.");
+        return false;
+    }
+
+    const int boardNum =
+        deviceManager->getSelectedBoardNumber();
+
+    LOGC ("MCDAQ DEBUG 2: Creating acquisition object");
+
+    acquisition =
+        std::make_unique<MCDAQAcquisition> (boardNum);
+
+    LOGC ("MCDAQ DEBUG 3: Calling MCC scan start");
+
+    const int error = acquisition->start (1000);
+
+    LOGC ("MCDAQ DEBUG 4: MCC returned ", error);
+
+    if (error != 0)
+    {
+        LOGE ("MCDAQ: Failed to start scan. UL error: ",
+              error);
+
+        acquisition.reset();
+        return false;
+    }
+
+    diagnosticTicks = 0;
+
+    const auto stats = acquisition->getStatistics();
+
+    LOGC ("MCDAQ: Continuous scan started. Board: ",
+          boardNum,
+          " | Actual rate: ",
+          stats.actualRate,
+          " S/s");
+
+    LOGC ("MCDAQ DEBUG 5: Starting DataThread");
+
+    startThread();
+
+    LOGC ("MCDAQ DEBUG 6: DataThread started");
+
     return true;
 }
 
 bool DataThreadPlugin::updateBuffer()
 {
+    if (! acquisition)
+        return false;
+
+    // Diagnostic only: avoid busy waiting.
+    Thread::sleep (100);
+
+    const auto stats = acquisition->getStatistics();
+
+    if (stats.scanError != 0)
+    {
+        LOGE ("MCDAQ: Scan error detected: ",
+              stats.scanError);
+        return false;
+    }
+
+    // Report approximately once per second.
+    if (++diagnosticTicks >= 10)
+    {
+        diagnosticTicks = 0;
+
+        LOGC ("MCDAQ: Notifications = ",
+              stats.notifications,
+              " | Last sample count = ",
+              stats.lastSampleCount);
+    }
+
     return true;
 }
 
 bool DataThreadPlugin::stopAcquisition()
 {
+    if (isThreadRunning())
+    {
+        signalThreadShouldExit();
+
+        if (! waitForThreadToExit (2000))
+        {
+            LOGE ("MCDAQ: Acquisition worker did not exit.");
+            return false;
+        }
+    }
+
+    if (acquisition)
+    {
+        const auto stats = acquisition->getStatistics();
+
+        acquisition->stop();
+
+        LOGC ("MCDAQ: Scan stopped.");
+        LOGC ("MCDAQ: Total notifications: ",
+              stats.notifications);
+        LOGC ("MCDAQ: Final reported sample count: ",
+              stats.lastSampleCount);
+        LOGC ("MCDAQ: Scan error: ",
+              stats.scanError);
+
+        acquisition.reset();
+    }
+
     return true;
 }
 
