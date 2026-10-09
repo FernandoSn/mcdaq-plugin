@@ -170,32 +170,45 @@ bool DataThreadPlugin::startAcquisition()
     return true;
 }
 
+
 bool DataThreadPlugin::updateBuffer()
 {
     if (! acquisition)
         return false;
 
-    // Diagnostic only: avoid busy waiting.
-    Thread::sleep (100);
+    // Temporary diagnostic interval.
+    Thread::sleep (20);
 
-    const auto stats = acquisition->getStatistics();
-
-    if (stats.scanError != 0)
+    if (! acquisition->consumeAvailable())
     {
-        LOGE ("MCDAQ: Scan error detected: ",
-              stats.scanError);
+        const auto stats =
+            acquisition->getStatistics();
+
+        LOGE ("MCDAQ: Acquisition integrity failure.");
+        LOGE ("MCDAQ: Scan error: ", stats.scanError);
+        LOGE ("MCDAQ: Read error: ", stats.readError);
+        LOGE ("MCDAQ: Possible data loss: ",
+              stats.possibleDataLoss);
+
         return false;
     }
 
-    // Report approximately once per second.
-    if (++diagnosticTicks >= 10)
+    // Approximately once per second.
+    if (++diagnosticTicks >= 50)
     {
         diagnosticTicks = 0;
 
-        LOGC ("MCDAQ: Notifications = ",
-              stats.notifications,
-              " | Last sample count = ",
-              stats.lastSampleCount);
+        const auto stats =
+            acquisition->getStatistics();
+
+        LOGC ("MCDAQ: Produced: ",
+              stats.totalSamplesProduced,
+              " | Consumed: ",
+              stats.totalSamplesConsumed,
+              " | Raw min/max: ",
+              stats.minimumRaw,
+              "/",
+              stats.maximumRaw);
     }
 
     return true;

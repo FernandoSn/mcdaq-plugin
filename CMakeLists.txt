@@ -115,6 +115,11 @@ endforeach()
 
 if(WIN32)
 
+    # To not define min max macros
+    target_compile_definitions(${PLUGIN_NAME}
+    PRIVATE NOMINMAX
+    )
+
     # Directory containing cbw.h and cbw64.lib
     set(MCC_UL_DIR
         "C:/Users/Public/Documents/Measurement Computing/DAQ/C"

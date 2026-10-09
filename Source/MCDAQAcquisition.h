@@ -11,7 +11,18 @@ public:
     {
         uint32_t notifications = 0;
         uint32_t lastSampleCount = 0;
+
+        uint64_t totalSamplesProduced = 0;
+        uint64_t totalSamplesConsumed = 0;
+
+        uint16_t minimumRaw = 0;
+        uint16_t maximumRaw = 0;
+        uint64_t rawChecksum = 0;
+
         int scanError = 0;
+        int readError = 0;
+        bool possibleDataLoss = false;
+
         long actualRate = 0;
     };
 
@@ -21,13 +32,14 @@ public:
     MCDAQAcquisition (const MCDAQAcquisition&) = delete;
     MCDAQAcquisition& operator= (const MCDAQAcquisition&) = delete;
 
-    // Diagnostic only: scan analog input channel 0.
-    // Returns zero on success.
     int start (long requestedRate = 1000);
-
-    // Stop acquisition and free MCC resources.
     void stop();
 
+    // Consume newly reported native ADC samples.
+    // Returns false on an acquisition-integrity failure.
+    bool consumeAvailable();
+
+    // Call from the acquisition worker, or after it stops.
     Statistics getStatistics() const;
 
 private:
