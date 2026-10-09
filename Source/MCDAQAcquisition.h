@@ -16,6 +16,25 @@ public:
         long currentIndex = -1;
     };
 
+    
+    struct StopDiagnostics
+    {
+        int stopError = -1;
+        int statusError = -1;
+        int disableEventError = -1;
+
+        short status = -1;
+        long currentCount = -1;
+        long currentIndex = -1;
+
+        bool drainAttempted = false;
+        bool drainSucceeded = false;
+
+        uint64_t finalProduced = 0;
+        uint64_t finalConsumed = 0;
+    };
+
+
     struct Statistics
     {
         uint32_t notifications = 0;
@@ -52,6 +71,8 @@ public:
     Statistics getStatistics() const;
 
     DriverStatus getDriverStatus() const;
+
+    StopDiagnostics getStopDiagnostics() const;
 
 private:
     struct Impl;

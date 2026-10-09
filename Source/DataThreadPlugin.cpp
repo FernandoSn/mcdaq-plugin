@@ -117,7 +117,6 @@ void DataThreadPlugin::updateSettings (OwnedArray<ContinuousChannel>* continuous
 {
 }
 
-
 bool DataThreadPlugin::startAcquisition()
 {
     LOGC ("MCDAQ DEBUG 1: Entered startAcquisition()");
@@ -243,39 +242,64 @@ bool DataThreadPlugin::stopAcquisition()
         }
     }
 
+    
     if (acquisition)
     {
-        const auto stats = acquisition->getStatistics();
-
-        const auto finalDriverStatus =
-            acquisition->getDriverStatus();
-
-        if (finalDriverStatus.error == 0)
-        {
-            LOGC ("MCDAQ: Pre-stop CurCount: ",
-                  finalDriverStatus.currentCount,
-                  " | CurIndex: ",
-                  finalDriverStatus.currentIndex,
-                  " | Status: ",
-                  finalDriverStatus.status);
-        }
-        else
-        {
-            LOGE ("MCDAQ: Pre-stop status failed: ",
-                  finalDriverStatus.error);
-        }
-
         acquisition->stop();
 
-        LOGC ("MCDAQ: Scan stopped.");
-        LOGC ("MCDAQ: Total notifications: ",
-              stats.notifications);
-        LOGC ("MCDAQ: Final reported sample count: ",
-              stats.lastSampleCount);
+        // Retrieve statistics AFTER the final drain.
+        const auto stopped =
+            acquisition->getStopDiagnostics();
+
+        const auto stats =
+            acquisition->getStatistics();
+
+        LOGC ("MCDAQ: Stop error: ",
+              stopped.stopError,
+              " | Disable-event error: ",
+              stopped.disableEventError);
+
+        LOGC ("MCDAQ: Post-stop CurCount: ",
+              stopped.currentCount,
+              " | CurIndex: ",
+              stopped.currentIndex);
+
+        LOGC ("MCDAQ: Final Produced: ",
+              stopped.finalProduced,
+              " | Final Consumed: ",
+              stopped.finalConsumed);
+
+        LOGC ("MCDAQ: Final drain attempted: ",
+              stopped.drainAttempted,
+              " | Successful: ",
+              stopped.drainSucceeded);
+
         LOGC ("MCDAQ: Scan error: ",
-              stats.scanError);
+              stats.scanError,
+              " | Read error: ",
+              stats.readError,
+              " | Possible data loss: ",
+              stats.possibleDataLoss);
+
+        // If UL could not stop or disconnect callbacks,
+        // keep the acquisition object for error recovery.
+        if (stopped.stopError != 0 || stopped.disableEventError != 0)
+        {
+            LOGE ("MCDAQ: Hardware shutdown incomplete.");
+            return false;
+        }
+
+        const bool clean =
+            stopped.statusError == 0 && stopped.drainSucceeded && stopped.finalProduced == stopped.finalConsumed && stats.scanError == 0 && stats.readError == 0 && ! stats.possibleDataLoss;
+
+        if (! clean)
+        {
+            LOGE ("MCDAQ: Acquisition integrity not verified.");
+        }
 
         acquisition.reset();
+
+        return clean;
     }
 
     return true;

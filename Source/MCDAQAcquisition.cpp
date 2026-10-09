@@ -29,6 +29,8 @@ struct MCDAQAcquisition::Impl
 
     int boardNumber;
 
+    StopDiagnostics lastStop;
+
     HGLOBAL buffer = nullptr;
 
     bool running = false;
@@ -115,6 +117,8 @@ int MCDAQAcquisition::start (long requestedRate)
 {
     if (impl_->running)
         return 0;
+
+    impl_->lastStop = {};
 
     impl_->notifications.store (0);
     impl_->reportedCount.store (0);
@@ -287,24 +291,117 @@ bool MCDAQAcquisition::consumeAvailable()
 
 void MCDAQAcquisition::stop()
 {
-    if (impl_->running)
-    {
-        cbStopBackground (
-            impl_->boardNumber,
-            AIFUNCTION);
+    if (! impl_->running)
+        return;
 
-        impl_->running = false;
+    auto& result = impl_->lastStop;
+
+    // 1. Stop hardware acquisition.
+    result.stopError = cbStopBackground (
+        impl_->boardNumber,
+        AIFUNCTION);
+
+    if (result.stopError != 0)
+    {
+        impl_->scanError.store (result.stopError);
+
+        // Do not free a buffer while hardware may
+        // still be writing into it.
+        return;
     }
 
+    // 2. Get the final driver count before freeing
+    // the UL buffer.
+    result.statusError = cbGetStatus (
+        impl_->boardNumber,
+        &result.status,
+        &result.currentCount,
+        &result.currentIndex,
+        AIFUNCTION);
+
+    // 3. Disable MCC callbacks before reconciling
+    // the final cumulative count.
     if (impl_->eventsEnabled)
     {
-        cbDisableEvent (
+        result.disableEventError = cbDisableEvent (
             impl_->boardNumber,
             ALL_EVENT_TYPES);
 
+        if (result.disableEventError != 0)
+        {
+            impl_->scanError.store (
+                result.disableEventError);
+            return;
+        }
+
         impl_->eventsEnabled = false;
     }
+    else
+    {
+        result.disableEventError = 0;
+    }
 
+    // 4. Verify that the scan stopped and that the
+    // reported buffer index matches our sample count.
+    if (result.statusError == 0 && result.status == 0 && result.currentIndex >= -1)
+    {
+        // UL's cumulative count has 32-bit semantics.
+        // Use unsigned subtraction to handle rollover.
+        const uint32_t finalCount =
+            static_cast<uint32_t> (
+                result.currentCount);
+
+        const uint32_t delta =
+            finalCount - impl_->previousReportedCount;
+
+        const uint64_t finalProduced =
+            impl_->produced + static_cast<uint64_t> (delta);
+
+        const long expectedIndex =
+            finalProduced == 0
+                ? -1
+                : static_cast<long> (
+                      (finalProduced - 1) % BUFFER_POINTS);
+
+        const bool validCount =
+            finalProduced >= impl_->consumed && finalProduced - impl_->consumed < static_cast<uint64_t> (BUFFER_POINTS);
+
+        const bool validIndex =
+            result.currentIndex == expectedIndex;
+
+        if (validCount && validIndex)
+        {
+            // 5. Publish the final hardware count to
+            // the existing consumer.
+            impl_->reportedCount.store (
+                finalCount,
+                std::memory_order_release);
+
+            result.drainAttempted = true;
+
+            // The hardware is stopped but 'running'
+            // remains true until the final copy finishes.
+            result.drainSucceeded =
+                consumeAvailable();
+        }
+        else
+        {
+            impl_->possibleDataLoss = true;
+        }
+    }
+    else
+    {
+        impl_->possibleDataLoss = true;
+    }
+
+    // 6. Capture final accounting before cleanup.
+    result.finalProduced = impl_->produced;
+    result.finalConsumed = impl_->consumed;
+
+    impl_->running = false;
+
+    // 7. Release the acquisition memory only
+    // after attempting the final drain.
     if (impl_->buffer != nullptr)
     {
         cbWinBufFree (impl_->buffer);
@@ -360,4 +457,10 @@ MCDAQAcquisition::DriverStatus
         AIFUNCTION);
 
     return result;
+}
+
+MCDAQAcquisition::StopDiagnostics
+    MCDAQAcquisition::getStopDiagnostics() const
+{
+    return impl_->lastStop;
 }
