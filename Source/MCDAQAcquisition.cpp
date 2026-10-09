@@ -342,3 +342,22 @@ MCDAQAcquisition::Statistics
 
     return result;
 }
+
+MCDAQAcquisition::DriverStatus
+    MCDAQAcquisition::getDriverStatus() const
+{
+    DriverStatus result;
+
+    // Only query an active background scan.
+    if (! impl_->running || impl_->buffer == nullptr)
+        return result;
+
+    result.error = cbGetStatus (
+        impl_->boardNumber,
+        &result.status,
+        &result.currentCount,
+        &result.currentIndex,
+        AIFUNCTION);
+
+    return result;
+}

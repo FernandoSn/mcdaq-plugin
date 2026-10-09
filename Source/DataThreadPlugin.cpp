@@ -201,14 +201,30 @@ bool DataThreadPlugin::updateBuffer()
         const auto stats =
             acquisition->getStatistics();
 
+        const auto driver =
+            acquisition->getDriverStatus();
+
         LOGC ("MCDAQ: Produced: ",
               stats.totalSamplesProduced,
               " | Consumed: ",
               stats.totalSamplesConsumed,
-              " | Raw min/max: ",
-              stats.minimumRaw,
-              "/",
-              stats.maximumRaw);
+              " | Callback count: ",
+              stats.lastSampleCount);
+
+        if (driver.error == 0)
+        {
+            LOGC ("MCDAQ: UL status: ",
+                  driver.status,
+                  " | CurCount: ",
+                  driver.currentCount,
+                  " | CurIndex: ",
+                  driver.currentIndex);
+        }
+        else
+        {
+            LOGE ("MCDAQ: cbGetStatus failed: ",
+                  driver.error);
+        }
     }
 
     return true;
@@ -230,6 +246,24 @@ bool DataThreadPlugin::stopAcquisition()
     if (acquisition)
     {
         const auto stats = acquisition->getStatistics();
+
+        const auto finalDriverStatus =
+            acquisition->getDriverStatus();
+
+        if (finalDriverStatus.error == 0)
+        {
+            LOGC ("MCDAQ: Pre-stop CurCount: ",
+                  finalDriverStatus.currentCount,
+                  " | CurIndex: ",
+                  finalDriverStatus.currentIndex,
+                  " | Status: ",
+                  finalDriverStatus.status);
+        }
+        else
+        {
+            LOGE ("MCDAQ: Pre-stop status failed: ",
+                  finalDriverStatus.error);
+        }
 
         acquisition->stop();
 

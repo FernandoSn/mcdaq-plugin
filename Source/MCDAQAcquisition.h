@@ -7,6 +7,15 @@
 class MCDAQAcquisition
 {
 public:
+    struct DriverStatus
+    {
+        int error = -1;
+        short status = -1;
+
+        long currentCount = -1;
+        long currentIndex = -1;
+    };
+
     struct Statistics
     {
         uint32_t notifications = 0;
@@ -41,6 +50,8 @@ public:
 
     // Call from the acquisition worker, or after it stops.
     Statistics getStatistics() const;
+
+    DriverStatus getDriverStatus() const;
 
 private:
     struct Impl;
