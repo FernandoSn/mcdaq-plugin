@@ -22,53 +22,65 @@
  */
 
 #include "DataThreadPlugin.h"
-
 #include "DataThreadPluginEditor.h"
 
-#ifdef _WIN32
-#include <cbw.h>
-#endif
+// Include MCC-specific definitions after Open Ephys headers
+#include "MCDAQDeviceManager.h"
 
 struct PluginSettingsObject
 {
     // Store settings for the plugin here
 };
 
-DataThreadPlugin::DataThreadPlugin (SourceNode* sn) : DataThread (sn)
+
+DataThreadPlugin::DataThreadPlugin (SourceNode* sn)
+    : DataThread (sn),
+      deviceManager (std::make_unique<MCDAQDeviceManager>())
 {
-#ifdef _WIN32
+    LOGC ("MCDAQ: Scanning for MCC USB devices...");
 
-    LOGC ("MCDAQ: Scanning for USB devices...");
-
-    constexpr int maxDevices = 16;
-
-    // Array to store the detected MCC device descriptors.
-    DaqDeviceDescriptor inventory[maxDevices] = {};
-
-    // On input, this is the capacity of the array.
-    // On output, it contains the number of detected devices.
-    int numDevices = maxDevices;
-
-    const int error = cbGetDaqDeviceInventory (
-        USB_IFC,
-        inventory,
-        &numDevices);
+    const int error = deviceManager->refresh();
 
     if (error != 0)
     {
-        LOGE ("MCDAQ: Device discovery failed. UL error: ", error);
+        LOGE ("MCDAQ: Device discovery failed. Error: ", error);
         return;
     }
 
-    LOGC ("MCDAQ: Found ", numDevices, " USB device(s).");
+    const auto& devices = deviceManager->getDevices();
 
-    for (int i = 0; i < numDevices && i < maxDevices; ++i)
+    LOGC ("MCDAQ: Found ", (int) devices.size(), " device(s).");
+
+    for (size_t i = 0; i < devices.size(); ++i)
     {
-        LOGC ("MCDAQ: [", i, "] ", inventory[i].ProductName, " | Unique ID: ", inventory[i].UniqueID);
+        const auto& device = devices[i];
+
+        LOGC ("MCDAQ: [", (int) i, "] ", device.productName.c_str(), " | Unique ID: ", device.uniqueId.c_str(), " | Board number: ", device.boardNumber);
     }
 
-#endif
+    // Automatically reserve one available board.
+    if (deviceManager->selectFirstAvailableBoard())
+    {
+        const auto name =
+            deviceManager->getSelectedProductName();
+
+        const auto id =
+            deviceManager->getSelectedUniqueId();
+
+        LOGC ("MCDAQ: Selected ",
+              name.c_str(),
+              " | Board number: ",
+              deviceManager->getSelectedBoardNumber(),
+              " | Unique ID: ",
+              id.c_str());
+    }
+    else
+    {
+        LOGE ("MCDAQ: No unassigned, registered MCC "
+              "board is available.");
+    }
 }
+
 
 DataThreadPlugin::~DataThreadPlugin()
 {

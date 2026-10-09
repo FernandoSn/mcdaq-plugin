@@ -25,6 +25,9 @@
 #define DATATHREADPLUGIN_H_DEFINED
 
 #include <DataThreadHeaders.h>
+#include <memory>
+
+class MCDAQDeviceManager;
 
 class DataThreadPlugin : public DataThread
 {
@@ -82,6 +85,9 @@ public:
 
     /** Called when a parameter value is updated, to allow plugin-specific responses */    
     void parameterValueChanged (Parameter* parameter) override;
+
+private:
+    std::unique_ptr<MCDAQDeviceManager> deviceManager;
 
 };
 
