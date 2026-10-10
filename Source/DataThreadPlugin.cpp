@@ -289,6 +289,8 @@ bool DataThreadPlugin::updateBuffer()
               stats.totalSamplesProduced,
               " | Consumed: ",
               stats.totalSamplesConsumed,
+              " | Delivered: ",
+              stats.totalSamplesDelivered,
               " | Callback count: ",
               stats.lastSampleCount);
 
@@ -349,7 +351,9 @@ bool DataThreadPlugin::stopAcquisition()
         LOGC ("MCDAQ: Final Produced: ",
               stopped.finalProduced,
               " | Final Consumed: ",
-              stopped.finalConsumed);
+              stopped.finalConsumed,
+              " | Final Delivered: ",
+              stats.totalSamplesDelivered);
 
         LOGC ("MCDAQ: Final drain attempted: ",
               stopped.drainAttempted,
@@ -372,7 +376,7 @@ bool DataThreadPlugin::stopAcquisition()
         }
 
         const bool clean =
-            stopped.statusError == 0 && stopped.drainSucceeded && stopped.finalProduced == stopped.finalConsumed && stats.scanError == 0 && stats.readError == 0 && ! stats.possibleDataLoss;
+            stopped.statusError == 0 && stopped.drainSucceeded && stopped.finalProduced == stopped.finalConsumed && stopped.finalConsumed == stats.totalSamplesDelivered && stats.scanError == 0 && stats.readError == 0 && ! stats.possibleDataLoss;
 
         if (! clean)
         {
