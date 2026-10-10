@@ -54,6 +54,8 @@ public:
         long actualRate = 0;
 
         uint64_t totalSamplesDelivered = 0;
+
+        uint64_t maxUnreadSamples = 0;
     };
 
     explicit MCDAQAcquisition (int boardNumber);

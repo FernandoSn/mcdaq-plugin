@@ -28,6 +28,9 @@
 #include "MCDAQDeviceManager.h"
 #include "MCDAQAcquisition.h"
 
+// Set to 1 when detailed acquisition diagnostics are needed.
+#define MCDAQ_VERBOSE_ACQUISITION_LOGS 0
+
 struct PluginSettingsObject
 {
     // Store settings for the plugin here
@@ -274,6 +277,7 @@ bool DataThreadPlugin::updateBuffer()
         return false;
     }
 
+    #if MCDAQ_VERBOSE_ACQUISITION_LOGS
     // Approximately once per second.
     if (++diagnosticTicks >= 50)
     {
@@ -309,6 +313,7 @@ bool DataThreadPlugin::updateBuffer()
                   driver.error);
         }
     }
+    #endif
 
     return true;
 }
@@ -366,6 +371,10 @@ bool DataThreadPlugin::stopAcquisition()
               stats.readError,
               " | Possible data loss: ",
               stats.possibleDataLoss);
+
+        LOGC ("MCDAQ: Maximum unread backlog: ",
+              stats.maxUnreadSamples,
+              " ADC sample points");
 
         // If UL could not stop or disconnect callbacks,
         // keep the acquisition object for error recovery.

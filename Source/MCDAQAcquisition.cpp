@@ -54,6 +54,8 @@ struct MCDAQAcquisition::Impl
     uint64_t produced = 0;
     uint64_t consumed = 0;
 
+    uint64_t maxUnreadSamples = 0;
+
     uint64_t checksum = 0;
 
     uint16_t minimumRaw =
@@ -105,6 +107,14 @@ struct MCDAQAcquisition::Impl
         previousReportedCount = current;
 
         produced += static_cast<uint64_t> (delta);
+
+        // Track the largest unread backlog observed by the worker.
+        const uint64_t unread = produced - consumed;
+
+        if (unread > maxUnreadSamples)
+        {
+            maxUnreadSamples = unread;
+        }
     }
 };
 
@@ -138,6 +148,8 @@ int MCDAQAcquisition::start (long requestedRate)
     impl_->lastStop = {};
 
     impl_->delivered = 0;
+
+    impl_->maxUnreadSamples = 0;
 
     impl_->notifications.store (0);
     impl_->reportedCount.store (0);
@@ -491,6 +503,8 @@ MCDAQAcquisition::Statistics
     result.actualRate = impl_->actualRate;
 
     result.totalSamplesDelivered = impl_->delivered;
+
+    result.maxUnreadSamples = impl_->maxUnreadSamples;
 
     return result;
 }
