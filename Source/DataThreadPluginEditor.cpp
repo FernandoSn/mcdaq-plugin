@@ -37,6 +37,7 @@ DataThreadPluginEditor::DataThreadPluginEditor (GenericProcessor* parentNode, Da
     sampleRateSelector = std::make_unique<juce::ComboBox> ("MCDAQ sample rate");
     for (const int rate : { 1000, 2000, 5000, 10000 })
         sampleRateSelector->addItem (juce::String (rate), rate);
+    sampleRateSelector->addItem ("30000 (nominal)", 30000);
     sampleRateSelector->setSelectedId (
         static_cast<int> (thread->getSampleRateHz()), juce::dontSendNotification);
     sampleRateSelector->setBounds (12, 50, 140, 22);

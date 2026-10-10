@@ -118,11 +118,28 @@ bool DataThreadPlugin::setSampleRateHz (long rateHz)
         return false;
 
     if (rateHz != 1000 && rateHz != 2000 &&
-        rateHz != 5000 && rateHz != 10000)
+        rateHz != 5000 && rateHz != 10000 && rateHz != 30000)
         return false;
 
     selectedSampleRateHz = rateHz;
     return true;
+}
+
+long DataThreadPlugin::getDeclaredSampleRateHz() const
+{
+    // Empirically observed with UL Rev 33 on the USB-1608FS-Plus:
+    // requesting nominal 30000 Hz yields 30007 Hz. Since Open Ephys
+    // builds DataStream metadata before startAcquisition(), advertise
+    // the actual driver-reported rate from the outset.
+    //
+    // This is provisional device-specific clock calibration, not a
+    // blanket tolerance. If UL returns anything else when starting,
+    // acquisition is rejected rather than silently mis-timestamped.
+    if (selectedSampleRateHz == 30000 && deviceManager &&
+        deviceManager->getSelectedProductName() == "USB-1608FS-Plus")
+        return 30007;
+
+    return selectedSampleRateHz;
 }
 
 void DataThreadPlugin::updateSettings (
@@ -156,7 +173,7 @@ void DataThreadPlugin::updateSettings (
         "mcdaq-" + String (uniqueId.c_str());
 
     // Single-channel AI0, +/-10 V; configurable per-channel rate.
-    const float sampleRate = static_cast<float> (selectedSampleRateHz);
+    const float sampleRate = static_cast<float> (getDeclaredSampleRateHz());
 
     DataStream::Settings streamSettings {
         streamName,
@@ -249,14 +266,16 @@ bool DataThreadPlugin::startAcquisition()
 
     const auto stats = acquisition->getStatistics();
 
-    // Metadata and timestamps must not disagree with the hardware clock.
-    // For now reject rates that MCC rounds to a different whole-number Hz.
-    // This is safer than silently writing a wrongly timed recording.
-    if (stats.actualRate != selectedSampleRateHz)
+    // Metadata has already been registered with Open Ephys. Require
+    // the driver-reported rate to match it exactly; do not relax this
+    // safety check just because MCC rounds its hardware clock.
+    const long declaredRate = getDeclaredSampleRateHz();
+    if (stats.actualRate != declaredRate)
     {
         LOGE ("MCDAQ: UL selected ", stats.actualRate,
-              " Hz instead of requested ", selectedSampleRateHz,
-              " Hz. Acquisition cancelled to protect timestamps.");
+              " Hz; Open Ephys stream declares ", declaredRate,
+              " Hz (nominal request: ", selectedSampleRateHz,
+              " Hz). Acquisition cancelled to protect timestamps.");
         acquisition->stop();
         const auto stopped = acquisition->getStopDiagnostics();
         if (stopped.stopError == 0 && stopped.disableEventError == 0)
@@ -267,6 +286,11 @@ bool DataThreadPlugin::startAcquisition()
     }
 
     activeSampleRateHz = static_cast<double> (stats.actualRate);
+
+    if (selectedSampleRateHz != declaredRate)
+        LOGC ("MCDAQ: Nominal selection ", selectedSampleRateHz,
+              " Hz maps to verified MCC clock ", declaredRate,
+              " Hz on this board.");
 
     LOGC ("MCDAQ: Continuous scan started. Board: ",
           boardNum,

@@ -53,6 +53,8 @@ public:
 
     // Single-channel test rates, set only while acquisition is stopped.
     long getSampleRateHz() const noexcept { return selectedSampleRateHz; }
+    // Hardware clock rate advertised to Open Ephys before streaming begins.
+    long getDeclaredSampleRateHz() const;
     bool setSampleRateHz (long rateHz);
 
     /** Passes the processor's info objects to DataThread, to allow them to be configured */
