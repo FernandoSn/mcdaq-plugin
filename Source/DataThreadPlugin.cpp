@@ -111,6 +111,20 @@ bool DataThreadPlugin::foundInputSource()
     return deviceManager && deviceManager->getSelectedBoardNumber() >= 0;
 }
 
+bool DataThreadPlugin::setSampleRateHz (long rateHz)
+{
+    // Prevent the GUI from changing the clock while the stream is live.
+    if (CoreServices::getAcquisitionStatus() || acquisition || isThreadRunning())
+        return false;
+
+    if (rateHz != 1000 && rateHz != 2000 &&
+        rateHz != 5000 && rateHz != 10000)
+        return false;
+
+    selectedSampleRateHz = rateHz;
+    return true;
+}
+
 void DataThreadPlugin::updateSettings (
     OwnedArray<ContinuousChannel>* continuousChannels,
     OwnedArray<EventChannel>* eventChannels,
@@ -141,9 +155,8 @@ void DataThreadPlugin::updateSettings (
     const String streamIdentifier =
         "mcdaq-" + String (uniqueId.c_str());
 
-    // Temporary fixed acquisition settings:
-    // AI0, +/-10 V, 1000 samples/sec.
-    constexpr float sampleRate = 1000.0f;
+    // Single-channel AI0, +/-10 V; configurable per-channel rate.
+    const float sampleRate = static_cast<float> (selectedSampleRateHz);
 
     DataStream::Settings streamSettings {
         streamName,
@@ -219,7 +232,7 @@ bool DataThreadPlugin::startAcquisition()
 
     LOGC ("MCDAQ DEBUG 3: Calling MCC scan start");
 
-    const int error = acquisition->start (1000);
+    const int error = acquisition->start (selectedSampleRateHz);
 
     LOGC ("MCDAQ DEBUG 4: MCC returned ", error);
 
@@ -236,11 +249,32 @@ bool DataThreadPlugin::startAcquisition()
 
     const auto stats = acquisition->getStatistics();
 
+    // Metadata and timestamps must not disagree with the hardware clock.
+    // For now reject rates that MCC rounds to a different whole-number Hz.
+    // This is safer than silently writing a wrongly timed recording.
+    if (stats.actualRate != selectedSampleRateHz)
+    {
+        LOGE ("MCDAQ: UL selected ", stats.actualRate,
+              " Hz instead of requested ", selectedSampleRateHz,
+              " Hz. Acquisition cancelled to protect timestamps.");
+        acquisition->stop();
+        const auto stopped = acquisition->getStopDiagnostics();
+        if (stopped.stopError == 0 && stopped.disableEventError == 0)
+            acquisition.reset();
+        else
+            LOGE ("MCDAQ: Shutdown incomplete after clock mismatch.");
+        return false;
+    }
+
+    activeSampleRateHz = static_cast<double> (stats.actualRate);
+
     LOGC ("MCDAQ: Continuous scan started. Board: ",
           boardNum,
           " | Actual rate: ",
           stats.actualRate,
-          " S/s");
+          " S/s | UL buffer: ", stats.bufferPoints,
+          " points | MCC event: ", stats.notificationPoints,
+          " points");
 
     LOGC ("MCDAQ DEBUG 5: Starting DataThread");
 
@@ -429,8 +463,11 @@ void DataThreadPlugin::resizeBuffers()
 
     if (foundInputSource())
     {
-        // One channel, 10,000 sampling frames.
-        sourceBuffers.add (new DataBuffer (1, 10000));
+        // A minimum of 10,000 frames, or four seconds at the chosen rate.
+        // Separate from the MCC driver-owned circular buffer.
+        const int frames = (std::max) (
+            10000, static_cast<int> (selectedSampleRateHz * 4));
+        sourceBuffers.add (new DataBuffer (1, frames));
     }
 }
 
@@ -501,7 +538,7 @@ std::size_t DataThreadPlugin::forwardRawBlock (
     const float voltsPerCount =
         20.0f / static_cast<float> (resolution);
 
-    constexpr double sampleRate = 1000.0;
+    const double sampleRate = activeSampleRateHz;
 
     for (std::size_t i = 0; i < count; ++i)
     {

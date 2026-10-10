@@ -14,12 +14,35 @@
 
 namespace
 {
-// Number of 16-bit ADC points, not bytes.
-constexpr long BUFFER_POINTS = 65536;
-
-constexpr unsigned NOTIFICATION_POINTS = 32; //256
-
+// Sizes are in native ADC sample points (not bytes or frames).
+// Keep the validated 65536-point minimum, then grow with throughput.
+constexpr long MIN_BUFFER_POINTS = 65536;
+constexpr long MAX_BUFFER_POINTS = 4194304;
+constexpr unsigned MIN_NOTIFICATION_POINTS = 32;
 constexpr size_t COPY_CHUNK_POINTS = 4096;
+
+// Request approximately 32 ms of samples per event. MCC USB transfers
+// are packetized; a multiple of 32 is appropriate for these two boards.
+unsigned chooseNotificationPoints (long rate)
+{
+    const uint64_t desired =
+        (static_cast<uint64_t> (rate) * 32u + 999u) / 1000u;
+    const uint64_t rounded = ((desired + 31u) / 32u) * 32u;
+    return static_cast<unsigned> ((std::max<uint64_t>) (
+        MIN_NOTIFICATION_POINTS, (std::min<uint64_t>) (rounded, 4096u)));
+}
+
+// Aim for at least four seconds of hardware data, rounded up to a power
+// of two. The minimum preserves the already-tested ring-buffer capacity.
+long chooseBufferPoints (long rate)
+{
+    const uint64_t desired = (std::max<uint64_t>) (
+        MIN_BUFFER_POINTS, static_cast<uint64_t> (rate) * 4u);
+    uint64_t capacity = MIN_BUFFER_POINTS;
+    while (capacity < desired && capacity < MAX_BUFFER_POINTS)
+        capacity *= 2u;
+    return desired > MAX_BUFFER_POINTS ? 0L : static_cast<long> (capacity);
+}
 } // namespace
 
 struct MCDAQAcquisition::Impl
@@ -94,6 +117,8 @@ struct MCDAQAcquisition::Impl
 
     int readError = 0;
     long actualRate = 0;
+    long bufferPoints = MIN_BUFFER_POINTS;
+    unsigned notificationPoints = MIN_NOTIFICATION_POINTS;
 
     static void __stdcall onEvent (
         int board,
@@ -184,6 +209,16 @@ int MCDAQAcquisition::start (long requestedRate)
     if (impl_->running)
         return 0;
 
+    // These are intentionally the first checks: avoid unbounded allocations
+    // and never start with an invalid or unsupported rate.
+    if (requestedRate < 1000 || requestedRate > 100000)
+        return -4;
+
+    impl_->bufferPoints = chooseBufferPoints (requestedRate);
+    impl_->notificationPoints = chooseNotificationPoints (requestedRate);
+    if (impl_->bufferPoints == 0)
+        return -4;
+
     impl_->lastStop = {};
 
     impl_->delivered = 0;
@@ -223,7 +258,7 @@ int MCDAQAcquisition::start (long requestedRate)
     impl_->readError = 0;
 
     // Native 16-bit ADC sample buffer.
-    impl_->buffer = cbWinBufAlloc (BUFFER_POINTS);
+    impl_->buffer = cbWinBufAlloc (impl_->bufferPoints);
 
     if (impl_->buffer == nullptr)
         return -1;
@@ -234,7 +269,7 @@ int MCDAQAcquisition::start (long requestedRate)
     int error = cbEnableEvent (
         impl_->boardNumber,
         eventMask,
-        NOTIFICATION_POINTS,
+        impl_->notificationPoints,
         &Impl::onEvent,
         impl_.get());
 
@@ -258,7 +293,7 @@ int MCDAQAcquisition::start (long requestedRate)
         impl_->boardNumber,
         0,
         0,
-        BUFFER_POINTS,
+        impl_->bufferPoints,
         &rate,
         BIP10VOLTS,
         impl_->buffer,
@@ -335,7 +370,7 @@ bool MCDAQAcquisition::consumeAvailable()
 
     // Check whether unconsumed samples may have
     // been overwritten in the MCC circular buffer.
-    if (impl_->produced - impl_->consumed >= static_cast<uint64_t> (BUFFER_POINTS))
+    if (impl_->produced - impl_->consumed >= static_cast<uint64_t> (impl_->bufferPoints))
     {
         impl_->possibleDataLoss = true;
         return false;
@@ -348,12 +383,12 @@ bool MCDAQAcquisition::consumeAvailable()
 
         const size_t firstPoint =
             static_cast<size_t> (
-                impl_->consumed % BUFFER_POINTS);
+                impl_->consumed % impl_->bufferPoints);
 
         // Never request a copy across the physical
         // end of the circular buffer.
         const size_t untilWrap =
-            static_cast<size_t> (BUFFER_POINTS) - firstPoint;
+            static_cast<size_t> (impl_->bufferPoints) - firstPoint;
 
         const size_t count = static_cast<size_t> (
             std::min<uint64_t> (
@@ -378,7 +413,7 @@ bool MCDAQAcquisition::consumeAvailable()
         // Check again before accepting this block.
         impl_->updateProducedCount();
 
-        if (impl_->produced - impl_->consumed >= static_cast<uint64_t> (BUFFER_POINTS))
+        if (impl_->produced - impl_->consumed >= static_cast<uint64_t> (impl_->bufferPoints))
         {
             impl_->possibleDataLoss = true;
             return false;
@@ -473,7 +508,7 @@ bool MCDAQAcquisition::checkWatchdog()
     const double actualRate = static_cast<double> (
         (std::max)(1L, impl_->actualRate));
     const double intervalMs = (std::max)(
-        50.0, (std::min)(500.0, 125.0 * BUFFER_POINTS / actualRate));
+        50.0, (std::min)(500.0, 125.0 * impl_->bufferPoints / actualRate));
 
     if (std::chrono::duration<double, std::milli> (
             now - impl_->lastWatchdogCheck).count() < intervalMs)
@@ -547,7 +582,7 @@ bool MCDAQAcquisition::checkWatchdog()
     impl_->watchdogNotificationLag = notificationLag;
 
     // A lag of at least half the UL buffer capacity is unsafe NOW.
-    if (notificationLag >= BUFFER_POINTS / 2)
+    if (notificationLag >= impl_->bufferPoints / 2)
     {
         impl_->watchdogFault = WatchdogFault::NotificationsLagging;
         return false;
@@ -557,8 +592,8 @@ bool MCDAQAcquisition::checkWatchdog()
     // to avoid reacting to normal packet batching or scheduling jitter.
     const int64_t rateQuarterSecond = static_cast<int64_t> (actualRate / 4.0);
     const int64_t lagLimit = (std::min)(
-        static_cast<int64_t> (BUFFER_POINTS / 4),
-        (std::max)(static_cast<int64_t> (NOTIFICATION_POINTS * 8),
+        static_cast<int64_t> (impl_->bufferPoints / 4),
+        (std::max)(static_cast<int64_t> (impl_->notificationPoints * 8),
                    rateQuarterSecond));
 
     if (notificationLag > lagLimit)
@@ -653,10 +688,10 @@ void MCDAQAcquisition::stop()
             finalProduced == 0
                 ? -1
                 : static_cast<long> (
-                      (finalProduced - 1) % BUFFER_POINTS);
+                      (finalProduced - 1) % impl_->bufferPoints);
 
         const bool validCount =
-            finalProduced >= impl_->consumed && finalProduced - impl_->consumed < static_cast<uint64_t> (BUFFER_POINTS);
+            finalProduced >= impl_->consumed && finalProduced - impl_->consumed < static_cast<uint64_t> (impl_->bufferPoints);
 
         const bool validIndex =
             result.currentIndex == expectedIndex;
@@ -728,6 +763,8 @@ MCDAQAcquisition::Statistics
     result.possibleDataLoss = impl_->possibleDataLoss;
 
     result.actualRate = impl_->actualRate;
+    result.bufferPoints = impl_->bufferPoints;
+    result.notificationPoints = impl_->notificationPoints;
 
     result.totalSamplesDelivered = impl_->delivered;
 

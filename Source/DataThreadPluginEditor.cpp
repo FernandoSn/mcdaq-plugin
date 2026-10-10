@@ -26,6 +26,61 @@
 DataThreadPluginEditor::DataThreadPluginEditor (GenericProcessor* parentNode, DataThreadPlugin* plugin)
     : GenericEditor (parentNode)
 {
-    desiredWidth = 150; // sets the width of the plugin editor
+    desiredWidth = 170;
     this->thread = plugin;
+
+    sampleRateLabel = std::make_unique<juce::Label>();
+    sampleRateLabel->setText ("Rate (Hz)", juce::dontSendNotification);
+    sampleRateLabel->setBounds (12, 28, 145, 18);
+    addAndMakeVisible (*sampleRateLabel);
+
+    sampleRateSelector = std::make_unique<juce::ComboBox> ("MCDAQ sample rate");
+    for (const int rate : { 1000, 2000, 5000, 10000 })
+        sampleRateSelector->addItem (juce::String (rate), rate);
+    sampleRateSelector->setSelectedId (
+        static_cast<int> (thread->getSampleRateHz()), juce::dontSendNotification);
+    sampleRateSelector->setBounds (12, 50, 140, 22);
+    sampleRateSelector->addListener (this);
+    addAndMakeVisible (*sampleRateSelector);
+}
+
+DataThreadPluginEditor::~DataThreadPluginEditor()
+{
+    sampleRateSelector->removeListener (this);
+}
+
+void DataThreadPluginEditor::comboBoxChanged (juce::ComboBox* box)
+{
+    if (box != sampleRateSelector.get())
+        return;
+
+    if (thread->setSampleRateHz (sampleRateSelector->getSelectedId()))
+    {
+        // Propagate the new rate to the Record Node, viewer, and buffers.
+        CoreServices::updateSignalChain (this);
+    }
+    else
+    {
+        // Don't show a clock setting that MCDAQ refused to apply.
+        sampleRateSelector->setSelectedId (
+            static_cast<int> (thread->getSampleRateHz()),
+            juce::dontSendNotification);
+    }
+}
+
+void DataThreadPluginEditor::saveCustomParametersToXml (XmlElement* xml)
+{
+    if (xml != nullptr)
+        xml->setAttribute ("sample_rate_hz", static_cast<int> (thread->getSampleRateHz()));
+}
+
+void DataThreadPluginEditor::loadCustomParametersFromXml (XmlElement* xml)
+{
+    if (xml == nullptr)
+        return;
+
+    const int rate = xml->getIntAttribute ("sample_rate_hz", 1000);
+    thread->setSampleRateHz (rate);
+    sampleRateSelector->setSelectedId (
+        static_cast<int> (thread->getSampleRateHz()), juce::dontSendNotification);
 }

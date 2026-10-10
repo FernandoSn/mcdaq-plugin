@@ -28,16 +28,23 @@
 
 #include "DataThreadPlugin.h"
 
-class DataThreadPluginEditor : public GenericEditor
+class DataThreadPluginEditor : public GenericEditor,
+                               private juce::ComboBox::Listener
 {
 public:
     /** The class constructor, used to initialize any members. */
     DataThreadPluginEditor (GenericProcessor* parentNode, DataThreadPlugin* thread);
 
     /** The class destructor, used to deallocate memory */
-    ~DataThreadPluginEditor() {}
+    ~DataThreadPluginEditor() override;
+
+    void saveCustomParametersToXml (XmlElement* xml) override;
+    void loadCustomParametersFromXml (XmlElement* xml) override;
 
 private:
+    void comboBoxChanged (juce::ComboBox* box) override;
+    std::unique_ptr<juce::ComboBox> sampleRateSelector;
+    std::unique_ptr<juce::Label> sampleRateLabel;
 
     /** A pointer to the underlying DataThreadPlugin */
     DataThreadPlugin* thread;

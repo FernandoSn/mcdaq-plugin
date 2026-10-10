@@ -67,6 +67,8 @@ public:
         bool possibleDataLoss = false;
 
         long actualRate = 0;
+        long bufferPoints = 0;
+        unsigned notificationPoints = 0;
 
         uint64_t totalSamplesDelivered = 0;
 

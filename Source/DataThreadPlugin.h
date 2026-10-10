@@ -51,6 +51,10 @@ public:
     /** Returns true if the data source is connected, false otherwise.*/
     bool foundInputSource();
 
+    // Single-channel test rates, set only while acquisition is stopped.
+    long getSampleRateHz() const noexcept { return selectedSampleRateHz; }
+    bool setSampleRateHz (long rateHz);
+
     /** Passes the processor's info objects to DataThread, to allow them to be configured */
     void updateSettings (OwnedArray<ContinuousChannel>* continuousChannels,
                          OwnedArray<EventChannel>* eventChannels,
@@ -95,6 +99,8 @@ private:
     std::unique_ptr<MCDAQDeviceManager> deviceManager;
     std::unique_ptr<MCDAQAcquisition> acquisition;
     unsigned int diagnosticTicks = 0;
+    long selectedSampleRateHz = 1000;
+    double activeSampleRateHz = 1000.0;
 
     
     static constexpr std::size_t BLOCK_SIZE = 4096;
