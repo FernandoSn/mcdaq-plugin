@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <limits>
 #include <vector>
@@ -49,6 +50,25 @@ struct MCDAQAcquisition::Impl
     std::atomic<uint32_t> notifications { 0 };
     std::atomic<uint32_t> reportedCount { 0 };
     std::atomic<int> scanError { 0 };
+    std::atomic<bool> scanErrorEventSeen { false };
+    std::atomic<bool> unexpectedEndEventSeen { false };
+    std::atomic<bool> intentionalStop { false };
+
+    // All watchdog state below belongs to the worker thread, except that
+    // start() resets it before launching the worker and stop() reads it
+    // after joining that worker.
+    using WatchClock = std::chrono::steady_clock;
+    WatchClock::time_point lastWatchdogCheck {};
+    WatchClock::time_point lastDriverProgress {};
+    uint32_t previousDriverCount = 0;
+    bool haveDriverCount = false;
+    unsigned consecutiveLagChecks = 0;
+    uint64_t watchdogChecks = 0;
+    long watchdogDriverCount = -1;
+    short watchdogDriverStatus = -1;
+    int watchdogStatusQueryError = 0;
+    int32_t watchdogNotificationLag = 0;
+    WatchdogFault watchdogFault = WatchdogFault::None;
 
     // Auto-reset: multiple notifications may be coalesced, which is fine.
     // The callback count remains the source of truth for produced samples.
@@ -96,14 +116,18 @@ struct MCDAQAcquisition::Impl
         }
         else if (eventType == ON_SCAN_ERROR)
         {
+            // A zero eventData must not hide the fact that an error
+            // notification occurred.
             self->scanError.store (
                 static_cast<int> (eventData), std::memory_order_release);
+            self->scanErrorEventSeen.store (true, std::memory_order_release);
             self->dataReady.signal();
         }
         else if (eventType == ON_END_OF_INPUT_SCAN)
         {
-            // Wake the worker if acquisition ends unexpectedly.
-            // Status/error handling will be hardened in the next milestone.
+            if (! self->intentionalStop.load (std::memory_order_acquire))
+                self->unexpectedEndEventSeen.store (true, std::memory_order_release);
+
             self->dataReady.signal();
         }
     }
@@ -169,6 +193,18 @@ int MCDAQAcquisition::start (long requestedRate)
     impl_->notifications.store (0);
     impl_->reportedCount.store (0);
     impl_->scanError.store (0);
+    impl_->scanErrorEventSeen.store (false);
+    impl_->unexpectedEndEventSeen.store (false);
+    impl_->intentionalStop.store (false);
+    impl_->watchdogFault = WatchdogFault::None;
+    impl_->watchdogChecks = 0;
+    impl_->watchdogDriverCount = -1;
+    impl_->watchdogDriverStatus = -1;
+    impl_->watchdogStatusQueryError = 0;
+    impl_->watchdogNotificationLag = 0;
+    impl_->previousDriverCount = 0;
+    impl_->haveDriverCount = false;
+    impl_->consecutiveLagChecks = 0;
     impl_->dataReady.reset(); // Acquisition is stopped; no callback is active yet.
 
     impl_->previousReportedCount = 0;
@@ -244,6 +280,8 @@ int MCDAQAcquisition::start (long requestedRate)
 
     impl_->actualRate = rate;
     impl_->running = true;
+    impl_->lastWatchdogCheck = Impl::WatchClock::now();
+    impl_->lastDriverProgress = impl_->lastWatchdogCheck;
 
     return 0;
 }
@@ -274,6 +312,18 @@ bool MCDAQAcquisition::consumeAvailable()
 {
     if (! impl_->running || impl_->buffer == nullptr)
         return false;
+
+    if (impl_->scanErrorEventSeen.load (std::memory_order_acquire))
+    {
+        impl_->watchdogFault = WatchdogFault::ScanErrorEvent;
+        return false;
+    }
+
+    if (impl_->unexpectedEndEventSeen.load (std::memory_order_acquire))
+    {
+        impl_->watchdogFault = WatchdogFault::UnexpectedScanEnd;
+        return false;
+    }
 
     if (impl_->scanError.load() != 0)
         return false;
@@ -392,12 +442,151 @@ bool MCDAQAcquisition::consumeAvailable()
     return true;
 }
 
+
+bool MCDAQAcquisition::checkWatchdog()
+{
+    if (! impl_->running || impl_->buffer == nullptr)
+        return false;
+
+    // Even if no new samples have arrived, check callback error flags now.
+    // Do not rely on eventData being nonzero for ON_SCAN_ERROR.
+    if (impl_->scanErrorEventSeen.load (std::memory_order_acquire))
+    {
+        impl_->watchdogFault = WatchdogFault::ScanErrorEvent;
+        return false;
+    }
+
+    if (impl_->unexpectedEndEventSeen.load (std::memory_order_acquire))
+    {
+        impl_->watchdogFault = WatchdogFault::UnexpectedScanEnd;
+        return false;
+    }
+
+    if (impl_->watchdogFault != WatchdogFault::None)
+        return false;
+
+    const auto now = Impl::WatchClock::now();
+
+    // Check at most twice/second at 1 kHz, and more often as the rate
+    // increases so one watchdog interval is a small fraction of the
+    // UL ring-buffer duration. The scan is currently single-channel.
+    const double actualRate = static_cast<double> (
+        (std::max)(1L, impl_->actualRate));
+    const double intervalMs = (std::max)(
+        50.0, (std::min)(500.0, 125.0 * BUFFER_POINTS / actualRate));
+
+    if (std::chrono::duration<double, std::milli> (
+            now - impl_->lastWatchdogCheck).count() < intervalMs)
+        return true;
+
+    impl_->lastWatchdogCheck = now;
+    ++impl_->watchdogChecks;
+
+    const DriverStatus driver = getDriverStatus();
+    impl_->watchdogDriverCount = driver.currentCount;
+    impl_->watchdogDriverStatus = driver.status;
+    impl_->watchdogStatusQueryError = driver.error;
+
+    if (driver.error != 0)
+    {
+        impl_->watchdogFault = WatchdogFault::StatusQueryFailed;
+        return false;
+    }
+
+    // MCC: 1 is RUNNING; 0 means IDLE. A continuous scan must
+    // remain RUNNING until MCDAQ explicitly requests shutdown.
+    if (driver.status != 1)
+    {
+        impl_->watchdogFault = WatchdogFault::ScanStoppedUnexpectedly;
+        return false;
+    }
+
+    // Windows 'long' and UL's CurCount are signed 32-bit. Compare modulo
+    // 2^32 to tolerate the documented counter rollover.
+    const uint32_t current = static_cast<uint32_t> (driver.currentCount);
+
+    if (! impl_->haveDriverCount)
+    {
+        impl_->previousDriverCount = current;
+        impl_->haveDriverCount = true;
+        impl_->lastDriverProgress = now;
+    }
+    else
+    {
+        const int32_t delta = static_cast<int32_t> (
+            current - impl_->previousDriverCount);
+
+        if (delta < 0)
+        {
+            impl_->watchdogFault = WatchdogFault::DriverCountWentBackwards;
+            return false;
+        }
+
+        if (delta > 0)
+        {
+            impl_->lastDriverProgress = now;
+            impl_->previousDriverCount = current;
+        }
+    }
+
+    // A continuously clocked 1 kHz (or faster) scan should not stop
+    // advancing for two seconds while UL still claims it is running.
+    if (std::chrono::duration<double> (
+            now - impl_->lastDriverProgress).count() >= 2.0)
+    {
+        impl_->watchdogFault = WatchdogFault::DriverCountStalled;
+        return false;
+    }
+
+    // Driver count and callback count are sampled at different instants.
+    // A small positive difference is normal between USB notifications.
+    const uint32_t callbackCount = impl_->reportedCount.load (
+        std::memory_order_acquire);
+    const int32_t notificationLag = static_cast<int32_t> (
+        current - callbackCount);
+    impl_->watchdogNotificationLag = notificationLag;
+
+    // A lag of at least half the UL buffer capacity is unsafe NOW.
+    if (notificationLag >= BUFFER_POINTS / 2)
+    {
+        impl_->watchdogFault = WatchdogFault::NotificationsLagging;
+        return false;
+    }
+
+    // Otherwise require two consecutive unusually large differences
+    // to avoid reacting to normal packet batching or scheduling jitter.
+    const int64_t rateQuarterSecond = static_cast<int64_t> (actualRate / 4.0);
+    const int64_t lagLimit = (std::min)(
+        static_cast<int64_t> (BUFFER_POINTS / 4),
+        (std::max)(static_cast<int64_t> (NOTIFICATION_POINTS * 8),
+                   rateQuarterSecond));
+
+    if (notificationLag > lagLimit)
+    {
+        if (++impl_->consecutiveLagChecks >= 2)
+        {
+            impl_->watchdogFault = WatchdogFault::NotificationsLagging;
+            return false;
+        }
+    }
+    else
+    {
+        impl_->consecutiveLagChecks = 0;
+    }
+
+    return true;
+}
+
 void MCDAQAcquisition::stop()
 {
     if (! impl_->running)
         return;
 
     auto& result = impl_->lastStop;
+
+    // The hardware may emit ON_END_OF_INPUT_SCAN during an intentional
+    // stop. Never interpret that event as an unexpected scan failure.
+    impl_->intentionalStop.store (true, std::memory_order_release);
 
     // 1. Stop hardware acquisition.
     result.stopError = cbStopBackground (
@@ -543,6 +732,14 @@ MCDAQAcquisition::Statistics
     result.totalSamplesDelivered = impl_->delivered;
 
     result.maxUnreadSamples = impl_->maxUnreadSamples;
+    result.watchdogFault = impl_->watchdogFault;
+    result.watchdogChecks = impl_->watchdogChecks;
+    result.watchdogDriverCount = impl_->watchdogDriverCount;
+    result.watchdogDriverStatus = impl_->watchdogDriverStatus;
+    result.watchdogStatusQueryError = impl_->watchdogStatusQueryError;
+    result.watchdogNotificationLag = impl_->watchdogNotificationLag;
+    result.scanErrorEventSeen = impl_->scanErrorEventSeen.load();
+    result.unexpectedEndEventSeen = impl_->unexpectedEndEventSeen.load();
 
     return result;
 }

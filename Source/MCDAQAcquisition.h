@@ -1,6 +1,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 
@@ -35,6 +36,20 @@ public:
     };
 
 
+    // Latched on the acquisition worker; non-zero means data integrity
+    // can no longer be verified. Codes are deliberately stable for logs.
+    enum class WatchdogFault : int
+    {
+        None = 0,
+        ScanErrorEvent = 1,
+        UnexpectedScanEnd = 2,
+        StatusQueryFailed = 3,
+        ScanStoppedUnexpectedly = 4,
+        DriverCountStalled = 5,
+        NotificationsLagging = 6,
+        DriverCountWentBackwards = 7
+    };
+
     struct Statistics
     {
         uint32_t notifications = 0;
@@ -56,6 +71,15 @@ public:
         uint64_t totalSamplesDelivered = 0;
 
         uint64_t maxUnreadSamples = 0;
+
+        WatchdogFault watchdogFault = WatchdogFault::None;
+        uint64_t watchdogChecks = 0;
+        long watchdogDriverCount = -1;
+        short watchdogDriverStatus = -1;
+        int watchdogStatusQueryError = 0;
+        int32_t watchdogNotificationLag = 0;
+        bool scanErrorEventSeen = false;
+        bool unexpectedEndEventSeen = false;
     };
 
     explicit MCDAQAcquisition (int boardNumber);
@@ -70,6 +94,11 @@ public:
     // Consume newly reported native ADC samples.
     // Returns false on an acquisition-integrity failure.
     bool consumeAvailable();
+
+    // Periodic independent UL status check, called ONLY by the worker.
+    // Does not alter the callback sample counter or copy buffer contents.
+    // Returns false and latches a fault if continuous acquisition is unsafe.
+    bool checkWatchdog();
 
     // Called by the Open Ephys DataThread worker (never by the MCC callback).
     // Wakes when MCC reports data/error, or when timeoutMilliseconds elapses.

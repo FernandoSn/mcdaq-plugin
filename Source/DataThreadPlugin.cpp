@@ -267,7 +267,7 @@ bool DataThreadPlugin::updateBuffer()
     if (threadShouldExit())
         return true;
 
-    if (! acquisition->consumeAvailable())
+    if (! acquisition->consumeAvailable() || ! acquisition->checkWatchdog())
     {
         const auto stats =
             acquisition->getStatistics();
@@ -277,6 +277,14 @@ bool DataThreadPlugin::updateBuffer()
         LOGE ("MCDAQ: Read error: ", stats.readError);
         LOGE ("MCDAQ: Possible data loss: ",
               stats.possibleDataLoss);
+        LOGE ("MCDAQ: Watchdog fault: ",
+              static_cast<int> (stats.watchdogFault),
+              " | Scan error event: ", stats.scanErrorEventSeen,
+              " | Unexpected scan end: ", stats.unexpectedEndEventSeen);
+        LOGE ("MCDAQ: Last watchdog driver status/count: ",
+              stats.watchdogDriverStatus, " / ", stats.watchdogDriverCount,
+              " | UL query error: ", stats.watchdogStatusQueryError,
+              " | Driver-callback lag: ", stats.watchdogNotificationLag);
 
         return false;
     }
@@ -384,6 +392,13 @@ bool DataThreadPlugin::stopAcquisition()
               stats.maxUnreadSamples,
               " ADC sample points");
 
+        LOGC ("MCDAQ: Watchdog checks: ",
+              stats.watchdogChecks,
+              " | Fault: ", static_cast<int> (stats.watchdogFault),
+              " | Driver status/count: ",
+              stats.watchdogDriverStatus, " / ",
+              stats.watchdogDriverCount);
+
         // If UL could not stop or disconnect callbacks,
         // keep the acquisition object for error recovery.
         if (stopped.stopError != 0 || stopped.disableEventError != 0)
@@ -393,7 +408,7 @@ bool DataThreadPlugin::stopAcquisition()
         }
 
         const bool clean =
-            stopped.statusError == 0 && stopped.drainSucceeded && stopped.finalProduced == stopped.finalConsumed && stopped.finalConsumed == stats.totalSamplesDelivered && stats.scanError == 0 && stats.readError == 0 && ! stats.possibleDataLoss;
+            stopped.statusError == 0 && stopped.drainSucceeded && stopped.finalProduced == stopped.finalConsumed && stopped.finalConsumed == stats.totalSamplesDelivered && stats.scanError == 0 && stats.readError == 0 && ! stats.possibleDataLoss && stats.watchdogFault == MCDAQAcquisition::WatchdogFault::None;
 
         if (! clean)
         {
