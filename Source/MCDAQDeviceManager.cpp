@@ -180,6 +180,12 @@ bool MCDAQDeviceManager::selectFirstAvailableBoard()
         const auto& descriptor = impl_->descriptors[i];
         auto& device = impl_->devices[i];
 
+        // This source plugin is designed and validated only for these
+        // two boards. Do not reserve unrelated MCC USB devices.
+        if (device.productName != "USB-204" &&
+            device.productName != "USB-1608FS-Plus")
+            continue;
+
         // Another instance may have already registered it.
         if (cbGetBoardNumber (descriptor) >= 0)
             continue;
@@ -283,6 +289,17 @@ std::string
     return impl_->selectedUniqueId;
 }
 
+
+MCDAQDeviceManager::ScanCapabilities
+MCDAQDeviceManager::getSelectedScanCapabilities() const
+{
+    const std::string product = getSelectedProductName();
+    if (product == "USB-204")
+        return { true, false, 8, 500000, 500000 };
+    if (product == "USB-1608FS-Plus")
+        return { true, true, 8, 100000, 400000 };
+    return {};
+}
 
 int MCDAQDeviceManager::readAnalogVoltage (
     int channel,

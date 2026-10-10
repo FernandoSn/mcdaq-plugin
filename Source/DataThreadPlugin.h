@@ -29,6 +29,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 class MCDAQDeviceManager;
 
@@ -51,11 +53,17 @@ public:
     /** Returns true if the data source is connected, false otherwise.*/
     bool foundInputSource();
 
-    // Single-channel test rates, set only while acquisition is stopped.
+    // Sampling rate is per channel; hardware limits depend on board and N.
     long getSampleRateHz() const noexcept { return selectedSampleRateHz; }
     // Hardware clock rate advertised to Open Ephys before streaming begins.
     long getDeclaredSampleRateHz() const;
     bool setSampleRateHz (long rateHz);
+    int getChannelCount() const noexcept { return selectedChannelCount; }
+    bool setChannelCount (int channelCount);
+    std::vector<long> getAvailableRates() const;
+    std::vector<int> getAvailableChannelCounts() const;
+    bool isSimultaneousSampling() const;
+    std::string getSamplingModeDescription() const;
 
     /** Passes the processor's info objects to DataThread, to allow them to be configured */
     void updateSettings (OwnedArray<ContinuousChannel>* continuousChannels,
@@ -102,6 +110,7 @@ private:
     std::unique_ptr<MCDAQAcquisition> acquisition;
     unsigned int diagnosticTicks = 0;
     long selectedSampleRateHz = 1000;
+    int selectedChannelCount = 1;
     double activeSampleRateHz = 1000.0;
 
     
@@ -112,6 +121,8 @@ private:
     std::array<double, BLOCK_SIZE> timestamps {};
     std::array<uint64_t, BLOCK_SIZE> eventCodes {};
 
+    // Layout: consecutive frames for AI0, then AI1, etc. The output
+    // array is 4096 ADC points regardless of selected channel count.
     // Called by MCDAQAcquisition's consumer,
     // not directly by the MCC event callback.
     static std::size_t receiveRawBlock (

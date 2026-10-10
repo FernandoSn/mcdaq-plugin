@@ -29,7 +29,7 @@ unsigned chooseNotificationPoints (long rate)
         (static_cast<uint64_t> (rate) * 32u + 999u) / 1000u;
     const uint64_t rounded = ((desired + 31u) / 32u) * 32u;
     return static_cast<unsigned> ((std::max<uint64_t>) (
-        MIN_NOTIFICATION_POINTS, (std::min<uint64_t>) (rounded, 4096u)));
+        MIN_NOTIFICATION_POINTS, (std::min<uint64_t>) (rounded, 8192u)));
 }
 
 // Aim for at least four seconds of hardware data, rounded up to a power
@@ -116,7 +116,9 @@ struct MCDAQAcquisition::Impl
     bool possibleDataLoss = false;
 
     int readError = 0;
-    long actualRate = 0;
+    long actualRate = 0; // per channel
+    int channelCount = 1;
+    uint64_t trailingPartialPoints = 0;
     long bufferPoints = MIN_BUFFER_POINTS;
     unsigned notificationPoints = MIN_NOTIFICATION_POINTS;
 
@@ -204,19 +206,29 @@ void MCDAQAcquisition::setRawBlockCallback (
     impl_->rawBlockUserData = userData;
 }
 
-int MCDAQAcquisition::start (long requestedRate)
+int MCDAQAcquisition::start (long requestedRate, int channelCount)
 {
     if (impl_->running)
         return 0;
 
     // These are intentionally the first checks: avoid unbounded allocations
     // and never start with an invalid or unsupported rate.
-    if (requestedRate < 1000 || requestedRate > 100000)
+    if (requestedRate < 500 || requestedRate > 100000 ||
+        (channelCount != 1 && channelCount != 2 &&
+         channelCount != 4 && channelCount != 8))
         return -4;
 
-    impl_->bufferPoints = chooseBufferPoints (requestedRate);
-    impl_->notificationPoints = chooseNotificationPoints (requestedRate);
-    if (impl_->bufferPoints == 0)
+    // Both scan counters and circular-buffer positions are ADC points,
+    // not timestamps/frames. Make all scan boundaries whole frames.
+    const long aggregateRate = requestedRate * channelCount;
+    impl_->bufferPoints = chooseBufferPoints (aggregateRate);
+    impl_->notificationPoints = chooseNotificationPoints (aggregateRate);
+    impl_->channelCount = channelCount;
+    impl_->trailingPartialPoints = 0;
+    if (impl_->bufferPoints == 0 ||
+        impl_->bufferPoints % channelCount != 0 ||
+        impl_->notificationPoints % static_cast<unsigned> (channelCount) != 0 ||
+        COPY_CHUNK_POINTS % static_cast<size_t> (channelCount) != 0)
         return -4;
 
     impl_->lastStop = {};
@@ -292,7 +304,7 @@ int MCDAQAcquisition::start (long requestedRate)
     error = cbAInScan (
         impl_->boardNumber,
         0,
-        0,
+        channelCount - 1,
         impl_->bufferPoints,
         &rate,
         BIP10VOLTS,
@@ -376,7 +388,10 @@ bool MCDAQAcquisition::consumeAvailable()
         return false;
     }
 
-    while (impl_->consumed < impl_->produced)
+    // MCC data are AI0,AI1,...,AI(N-1),AI0,... . Do not deliver a
+    // partial frame (even if the hardware count happens to end there).
+    const uint64_t channels = static_cast<uint64_t> (impl_->channelCount);
+    while (impl_->produced - impl_->consumed >= channels)
     {
         const uint64_t available =
             impl_->produced - impl_->consumed;
@@ -390,12 +405,19 @@ bool MCDAQAcquisition::consumeAvailable()
         const size_t untilWrap =
             static_cast<size_t> (impl_->bufferPoints) - firstPoint;
 
-        const size_t count = static_cast<size_t> (
+        const size_t wholeFrames = static_cast<size_t> (
             std::min<uint64_t> (
-                available,
-                (std::min)(
-                    COPY_CHUNK_POINTS,
-                    untilWrap)));
+                available / channels,
+                (std::min) (
+                    static_cast<uint64_t> (COPY_CHUNK_POINTS / impl_->channelCount),
+                    static_cast<uint64_t> (untilWrap / impl_->channelCount))));
+        const size_t count = wholeFrames * impl_->channelCount;
+        if (count == 0 || impl_->consumed % channels != 0)
+        {
+            impl_->readError = -5; // Invalid frame alignment.
+            impl_->possibleDataLoss = true;
+            return false;
+        }
 
         const int error = cbWinBufToArray (
             impl_->buffer,
@@ -504,9 +526,9 @@ bool MCDAQAcquisition::checkWatchdog()
 
     // Check at most twice/second at 1 kHz, and more often as the rate
     // increases so one watchdog interval is a small fraction of the
-    // UL ring-buffer duration. The scan is currently single-channel.
+    // UL ring-buffer duration. Rate here is aggregate ADC points/s.
     const double actualRate = static_cast<double> (
-        (std::max)(1L, impl_->actualRate));
+        (std::max)(1L, impl_->actualRate)) * impl_->channelCount;
     const double intervalMs = (std::max)(
         50.0, (std::min)(500.0, 125.0 * impl_->bufferPoints / actualRate));
 
@@ -564,7 +586,7 @@ bool MCDAQAcquisition::checkWatchdog()
         }
     }
 
-    // A continuously clocked 1 kHz (or faster) scan should not stop
+    // A continuously clocked scan should not stop
     // advancing for two seconds while UL still claims it is running.
     if (std::chrono::duration<double> (
             now - impl_->lastDriverProgress).count() >= 2.0)
@@ -684,11 +706,22 @@ void MCDAQAcquisition::stop()
         const uint64_t finalProduced =
             impl_->produced + static_cast<uint64_t> (delta);
 
+        // UL's CurIndex points to the FIRST ADC point of the last
+        // completed channel scan, not to the last individual ADC point.
+        // With N channels and K complete frames, that means the first
+        // point of frame K-1. The old (finalProduced-1) expression was
+        // correct only for single-channel acquisition and incorrectly
+        // rejected every clean multichannel stop.
+        //
+        // Deliberately floor to complete frames here: any trailing
+        // incomplete frame is separately rejected below, not hidden.
+        const uint64_t channels = static_cast<uint64_t> (impl_->channelCount);
+        const uint64_t completedFrames = finalProduced / channels;
         const long expectedIndex =
-            finalProduced == 0
+            completedFrames == 0
                 ? -1
                 : static_cast<long> (
-                      (finalProduced - 1) % impl_->bufferPoints);
+                      ((completedFrames - 1) * channels) % impl_->bufferPoints);
 
         const bool validCount =
             finalProduced >= impl_->consumed && finalProduced - impl_->consumed < static_cast<uint64_t> (impl_->bufferPoints);
@@ -708,8 +741,17 @@ void MCDAQAcquisition::stop()
 
             // The hardware is stopped but 'running'
             // remains true until the final copy finishes.
-            result.drainSucceeded =
-                consumeAvailable();
+            result.drainSucceeded = consumeAvailable();
+            impl_->trailingPartialPoints =
+                impl_->produced - impl_->consumed;
+            // Never report a clean stop while silently dropping the
+            // end of a multi-channel scan. This may occur if UL
+            // stops halfway through a hardware scan frame.
+            if (impl_->trailingPartialPoints != 0)
+            {
+                impl_->possibleDataLoss = true;
+                result.drainSucceeded = false;
+            }
         }
         else
         {
@@ -765,6 +807,8 @@ MCDAQAcquisition::Statistics
     result.actualRate = impl_->actualRate;
     result.bufferPoints = impl_->bufferPoints;
     result.notificationPoints = impl_->notificationPoints;
+    result.channelCount = impl_->channelCount;
+    result.trailingPartialPoints = impl_->trailingPartialPoints;
 
     result.totalSamplesDelivered = impl_->delivered;
 

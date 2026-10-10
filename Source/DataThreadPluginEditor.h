@@ -45,6 +45,10 @@ private:
     void comboBoxChanged (juce::ComboBox* box) override;
     std::unique_ptr<juce::ComboBox> sampleRateSelector;
     std::unique_ptr<juce::Label> sampleRateLabel;
+    std::unique_ptr<juce::ComboBox> channelSelector;
+    std::unique_ptr<juce::Label> channelLabel;
+    std::unique_ptr<juce::Label> samplingModeLabel;
+    void refreshSelectors();
 
     /** A pointer to the underlying DataThreadPlugin */
     DataThreadPlugin* thread;

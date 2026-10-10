@@ -19,6 +19,17 @@ public:
         int boardNumber = -1;
     };
 
+    // Known-board continuous scan capabilities (hardware-paced; not BURSTIO).
+    // No generic fallback: unknown boards are not treated as compatible.
+    struct ScanCapabilities
+    {
+        bool supported = false;
+        bool simultaneous = false;
+        int analogChannels = 0;
+        long maxPerChannelHz = 0;
+        long maxAggregateHz = 0;
+    };
+
     MCDAQDeviceManager();
     ~MCDAQDeviceManager();
 
@@ -46,6 +57,7 @@ public:
 
     std::string getSelectedProductName() const;
     std::string getSelectedUniqueId() const;
+    ScanCapabilities getSelectedScanCapabilities() const;
 
     // Diagnostic: read one analog input in volts.
     // Not intended for continuous acquisition.

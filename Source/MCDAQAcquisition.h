@@ -69,6 +69,8 @@ public:
         long actualRate = 0;
         long bufferPoints = 0;
         unsigned notificationPoints = 0;
+        int channelCount = 1;
+        uint64_t trailingPartialPoints = 0;
 
         uint64_t totalSamplesDelivered = 0;
 
@@ -90,7 +92,9 @@ public:
     MCDAQAcquisition (const MCDAQAcquisition&) = delete;
     MCDAQAcquisition& operator= (const MCDAQAcquisition&) = delete;
 
-    int start (long requestedRate = 1000);
+    // Rate is samples/second PER CHANNEL; Count and UL callback counts
+    // remain in aggregate, interleaved ADC points.
+    int start (long requestedRate = 1000, int channelCount = 1);
     void stop();
 
     // Consume newly reported native ADC samples.

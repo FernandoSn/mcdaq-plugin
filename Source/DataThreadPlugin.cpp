@@ -108,27 +108,93 @@ DataThreadPlugin::~DataThreadPlugin()
 
 bool DataThreadPlugin::foundInputSource()
 {
-    return deviceManager && deviceManager->getSelectedBoardNumber() >= 0;
+    return deviceManager && deviceManager->getSelectedBoardNumber() >= 0 &&
+           deviceManager->getSelectedScanCapabilities().supported;
+}
+
+namespace
+{
+constexpr long allowedRates[] = { 500, 1000, 2000, 10000, 25000, 30000 };
+bool allowedRate (long hz)
+{
+    for (const long rate : allowedRates)
+        if (rate == hz) return true;
+    return false;
+}
+}
+
+std::vector<long> DataThreadPlugin::getAvailableRates() const
+{
+    std::vector<long> result;
+    if (! deviceManager) return result;
+    const auto cap = deviceManager->getSelectedScanCapabilities();
+    if (! cap.supported) return result;
+    for (const long rate : allowedRates)
+        if (rate <= cap.maxPerChannelHz &&
+            static_cast<int64_t> (rate) * selectedChannelCount <= cap.maxAggregateHz)
+            result.push_back (rate);
+    return result;
+}
+
+std::vector<int> DataThreadPlugin::getAvailableChannelCounts() const
+{
+    std::vector<int> result;
+    if (! deviceManager) return result;
+    const auto cap = deviceManager->getSelectedScanCapabilities();
+    if (! cap.supported) return result;
+    for (int channels : { 1, 2, 4, 8 })
+        if (channels <= cap.analogChannels &&
+            selectedSampleRateHz <= cap.maxPerChannelHz &&
+            static_cast<int64_t> (selectedSampleRateHz) * channels <= cap.maxAggregateHz)
+            result.push_back (channels);
+    return result;
 }
 
 bool DataThreadPlugin::setSampleRateHz (long rateHz)
 {
-    // Prevent the GUI from changing the clock while the stream is live.
-    if (CoreServices::getAcquisitionStatus() || acquisition || isThreadRunning())
+    if (CoreServices::getAcquisitionStatus() || acquisition || isThreadRunning() ||
+        ! allowedRate (rateHz))
         return false;
-
-    if (rateHz != 1000 && rateHz != 2000 &&
-        rateHz != 5000 && rateHz != 10000 && rateHz != 30000)
+    const auto cap = deviceManager->getSelectedScanCapabilities();
+    if (! cap.supported || rateHz > cap.maxPerChannelHz ||
+        static_cast<int64_t> (rateHz) * selectedChannelCount > cap.maxAggregateHz)
         return false;
-
     selectedSampleRateHz = rateHz;
     return true;
 }
 
+bool DataThreadPlugin::setChannelCount (int channelCount)
+{
+    if (CoreServices::getAcquisitionStatus() || acquisition || isThreadRunning() ||
+        (channelCount != 1 && channelCount != 2 && channelCount != 4 && channelCount != 8))
+        return false;
+    const auto cap = deviceManager->getSelectedScanCapabilities();
+    if (! cap.supported || channelCount > cap.analogChannels ||
+        selectedSampleRateHz > cap.maxPerChannelHz ||
+        static_cast<int64_t> (selectedSampleRateHz) * channelCount > cap.maxAggregateHz)
+        return false;
+    selectedChannelCount = channelCount;
+    return true;
+}
+
+bool DataThreadPlugin::isSimultaneousSampling() const
+{
+    return deviceManager && deviceManager->getSelectedScanCapabilities().simultaneous;
+}
+
+std::string DataThreadPlugin::getSamplingModeDescription() const
+{
+    const auto cap = deviceManager->getSelectedScanCapabilities();
+    if (! cap.supported) return "Unknown board: unsupported";
+    return cap.simultaneous ? "Simultaneous ADCs" : "Multiplexed (sequential ADC)";
+}
+
 long DataThreadPlugin::getDeclaredSampleRateHz() const
 {
-    // Empirically observed with UL Rev 33 on the USB-1608FS-Plus:
-    // requesting nominal 30000 Hz yields 30007 Hz. Since Open Ephys
+    // Empirically observed at 1 channel on the USB-1608FS-Plus:
+    // requesting nominal 30000 Hz yielded 30007 Hz. This is the
+    // expected clock for multichannel scans too, NOT yet verified there.
+    // Since Open Ephys
     // builds DataStream metadata before startAcquisition(), advertise
     // the actual driver-reported rate from the outset.
     //
@@ -172,7 +238,7 @@ void DataThreadPlugin::updateSettings (
     const String streamIdentifier =
         "mcdaq-" + String (uniqueId.c_str());
 
-    // Single-channel AI0, +/-10 V; configurable per-channel rate.
+    // One synchronous stream, channels AI0 through AI(N-1); +/-10 V.
     const float sampleRate = static_cast<float> (getDeclaredSampleRateHz());
 
     DataStream::Settings streamSettings {
@@ -193,17 +259,19 @@ void DataThreadPlugin::updateSettings (
             ? 20.0f / 4096.0f
             : 20.0f / 65536.0f;
 
-    ContinuousChannel::Settings channelSettings {
-        ContinuousChannel::Type::ADC,
-        "AI0",
-        "MCC analog input channel 0",
-        "mcdaq-ai0",
-        bitVolts,
-        stream
-    };
-
-    continuousChannels->add (
-        new ContinuousChannel (channelSettings));
+    for (int channel = 0; channel < selectedChannelCount; ++channel)
+    {
+        const String number (channel);
+        ContinuousChannel::Settings channelSettings {
+            ContinuousChannel::Type::ADC,
+            "AI" + number,
+            "MCC analog input channel " + number,
+            "mcdaq-ai" + number,
+            bitVolts,
+            stream
+        };
+        continuousChannels->add (new ContinuousChannel (channelSettings));
+    }
 
     // Placeholder event channel. Digital acquisition
     // is not yet implemented.
@@ -219,10 +287,12 @@ void DataThreadPlugin::updateSettings (
     eventChannels->add (
         new EventChannel (eventSettings));
 
-    LOGC ("MCDAQ: Registered AI0 at ",
-          sampleRate,
-          " Hz | Nominal bitVolts: ",
-          bitVolts);
+    LOGC ("MCDAQ: Registered AI0-AI", selectedChannelCount - 1,
+          " (", selectedChannelCount, " channels) at ", sampleRate,
+          " Hz/channel | Aggregate nominal: ",
+          sampleRate * selectedChannelCount,
+          " points/s | Sampling: ", getSamplingModeDescription().c_str(),
+          " | Nominal bitVolts: ", bitVolts);
 }
 
 bool DataThreadPlugin::startAcquisition()
@@ -231,7 +301,7 @@ bool DataThreadPlugin::startAcquisition()
 
     if (! foundInputSource())
     {
-        LOGE ("MCDAQ: No board selected.");
+        LOGE ("MCDAQ: No supported board selected.");
         return false;
     }
 
@@ -249,7 +319,7 @@ bool DataThreadPlugin::startAcquisition()
 
     LOGC ("MCDAQ DEBUG 3: Calling MCC scan start");
 
-    const int error = acquisition->start (selectedSampleRateHz);
+    const int error = acquisition->start (selectedSampleRateHz, selectedChannelCount);
 
     LOGC ("MCDAQ DEBUG 4: MCC returned ", error);
 
@@ -289,14 +359,17 @@ bool DataThreadPlugin::startAcquisition()
 
     if (selectedSampleRateHz != declaredRate)
         LOGC ("MCDAQ: Nominal selection ", selectedSampleRateHz,
-              " Hz maps to verified MCC clock ", declaredRate,
-              " Hz on this board.");
+              " Hz matches the expected (and start-validated) MCC rate ",
+              declaredRate, " Hz on this board.");
 
     LOGC ("MCDAQ: Continuous scan started. Board: ",
           boardNum,
           " | Actual rate: ",
           stats.actualRate,
-          " S/s | UL buffer: ", stats.bufferPoints,
+          " Hz/channel | Channels: ", stats.channelCount,
+          " | Aggregate: ", stats.actualRate * stats.channelCount,
+          " ADC points/s | Mode: ", getSamplingModeDescription().c_str(),
+          " | UL buffer: ", stats.bufferPoints,
           " points | MCC event: ", stats.notificationPoints,
           " points");
 
@@ -446,6 +519,11 @@ bool DataThreadPlugin::stopAcquisition()
               " | Possible data loss: ",
               stats.possibleDataLoss);
 
+        LOGC ("MCDAQ: Channels: ", stats.channelCount,
+              " | Final frames delivered: ",
+              stats.channelCount > 0 ? stats.totalSamplesDelivered / stats.channelCount : 0,
+              " | Trailing partial ADC points: ", stats.trailingPartialPoints);
+
         LOGC ("MCDAQ: Maximum unread backlog: ",
               stats.maxUnreadSamples,
               " ADC sample points");
@@ -490,8 +568,8 @@ void DataThreadPlugin::resizeBuffers()
         // A minimum of 10,000 frames, or four seconds at the chosen rate.
         // Separate from the MCC driver-owned circular buffer.
         const int frames = (std::max) (
-            10000, static_cast<int> (selectedSampleRateHz * 4));
-        sourceBuffers.add (new DataBuffer (1, frames));
+            10000, static_cast<int> (getDeclaredSampleRateHz() * 4));
+        sourceBuffers.add (new DataBuffer (selectedChannelCount, frames));
     }
 }
 
@@ -545,53 +623,44 @@ std::size_t DataThreadPlugin::forwardRawBlock (
     std::size_t count,
     uint64_t firstSample)
 {
-    if (samples == nullptr || count == 0 || count > BLOCK_SIZE || sourceBuffers.size() == 0)
-    {
+    const size_t n = static_cast<size_t> (selectedChannelCount);
+    if (samples == nullptr || n == 0 || count == 0 || count > BLOCK_SIZE ||
+        count % n != 0 || firstSample % n != 0 || sourceBuffers.size() == 0)
         return 0;
-    }
 
-    // Temporary fixed configuration: +/-10 V.
-    const std::string product =
-        deviceManager->getSelectedProductName();
-
-    const bool is12Bit = product == "USB-204";
-
+    // UL layout: [frame0_AI0,frame0_AI1,...,frame1_AI0,...].
+    // Open Ephys v1.x expects channel-major blocks:
+    // [all AI0 frames, all AI1 frames, ...].
+    const size_t frames = count / n;
+    const uint64_t firstFrame = firstSample / n;
+    const bool is12Bit = deviceManager->getSelectedProductName() == "USB-204";
     const int resolution = is12Bit ? 4096 : 65536;
     const int midpoint = resolution / 2;
-
-    const float voltsPerCount =
-        20.0f / static_cast<float> (resolution);
-
+    const float voltsPerCount = 20.0f / static_cast<float> (resolution);
     const double sampleRate = activeSampleRateHz;
 
-    for (std::size_t i = 0; i < count; ++i)
+    for (size_t frame = 0; frame < frames; ++frame)
     {
-        const int centeredCode =
-            static_cast<int> (samples[i]) - midpoint;
+        const int64_t sampleNumber = static_cast<int64_t> (firstFrame + frame);
+        sampleNumbers[frame] = sampleNumber;
+        timestamps[frame] = static_cast<double> (sampleNumber) / sampleRate;
+        eventCodes[frame] = 0; // Digital inputs not yet implemented.
 
-        voltageBlock[i] =
-            centeredCode * voltsPerCount;
-
-        const int64_t sampleNumber =
-            static_cast<int64_t> (firstSample + i);
-
-        sampleNumbers[i] = sampleNumber;
-
-        // Preliminary timebase: seconds since scan start.
-        timestamps[i] =
-            static_cast<double> (sampleNumber) / sampleRate;
-
-        // Digital inputs are not implemented yet.
-        eventCodes[i] = 0;
+        for (size_t channel = 0; channel < n; ++channel)
+        {
+            const int centeredCode =
+                static_cast<int> (samples[frame * n + channel]) - midpoint;
+            voltageBlock[channel * frames + frame] =
+                static_cast<float> (centeredCode) * voltsPerCount;
+        }
     }
 
-    const auto accepted =
-        sourceBuffers[0]->addToBuffer (
-            voltageBlock.data(),
-            sampleNumbers.data(),
-            timestamps.data(),
-            eventCodes.data(),
-            static_cast<int> (count));
+    const auto accepted = sourceBuffers[0]->addToBuffer (
+        voltageBlock.data(), sampleNumbers.data(), timestamps.data(),
+        eventCodes.data(), static_cast<int> (frames));
 
-    return static_cast<std::size_t> (accepted);
+    if (accepted < 0 || static_cast<size_t> (accepted) != frames)
+        return 0; // The acquisition engine latches this as a delivery failure.
+
+    return count; // Report accepted ADC points, not frames.
 }
