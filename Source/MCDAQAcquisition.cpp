@@ -7,6 +7,8 @@
 #include <limits>
 #include <vector>
 
+// Include JUCE before MCC's cbw.h to keep MCC macros out of JUCE headers.
+#include <DataThreadHeaders.h>
 #include <cbw.h>
 
 namespace
@@ -14,7 +16,7 @@ namespace
 // Number of 16-bit ADC points, not bytes.
 constexpr long BUFFER_POINTS = 65536;
 
-constexpr unsigned NOTIFICATION_POINTS = 256;
+constexpr unsigned NOTIFICATION_POINTS = 32; //256
 
 constexpr size_t COPY_CHUNK_POINTS = 4096;
 } // namespace
@@ -47,6 +49,10 @@ struct MCDAQAcquisition::Impl
     std::atomic<uint32_t> notifications { 0 };
     std::atomic<uint32_t> reportedCount { 0 };
     std::atomic<int> scanError { 0 };
+
+    // Auto-reset: multiple notifications may be coalesced, which is fine.
+    // The callback count remains the source of truth for produced samples.
+    juce::WaitableEvent dataReady { false };
 
     // Owned by the acquisition worker thread.
     uint32_t previousReportedCount = 0;
@@ -85,11 +91,20 @@ struct MCDAQAcquisition::Impl
 
             self->notifications.fetch_add (
                 1, std::memory_order_relaxed);
+
+            self->dataReady.signal();
         }
         else if (eventType == ON_SCAN_ERROR)
         {
             self->scanError.store (
-                static_cast<int> (eventData));
+                static_cast<int> (eventData), std::memory_order_release);
+            self->dataReady.signal();
+        }
+        else if (eventType == ON_END_OF_INPUT_SCAN)
+        {
+            // Wake the worker if acquisition ends unexpectedly.
+            // Status/error handling will be hardened in the next milestone.
+            self->dataReady.signal();
         }
     }
 
@@ -154,6 +169,7 @@ int MCDAQAcquisition::start (long requestedRate)
     impl_->notifications.store (0);
     impl_->reportedCount.store (0);
     impl_->scanError.store (0);
+    impl_->dataReady.reset(); // Acquisition is stopped; no callback is active yet.
 
     impl_->previousReportedCount = 0;
 
@@ -230,6 +246,28 @@ int MCDAQAcquisition::start (long requestedRate)
     impl_->running = true;
 
     return 0;
+}
+
+void MCDAQAcquisition::waitForData (double timeoutMilliseconds)
+{
+    if (! impl_->running)
+        return;
+
+    // Avoid sleeping if a callback arrived while the worker was processing
+    // the previous block, or an error was already reported.
+    if (impl_->scanError.load (std::memory_order_acquire) != 0 ||
+        impl_->reportedCount.load (std::memory_order_acquire) !=
+            impl_->previousReportedCount)
+        return;
+
+    // An event arriving just before wait() is retained by the auto-reset
+    // event. Even if a notification is missed, the timeout lets us recheck.
+    impl_->dataReady.wait (timeoutMilliseconds);
+}
+
+void MCDAQAcquisition::wakeWorker()
+{
+    impl_->dataReady.signal();
 }
 
 bool MCDAQAcquisition::consumeAvailable()

@@ -71,6 +71,14 @@ public:
     // Returns false on an acquisition-integrity failure.
     bool consumeAvailable();
 
+    // Called by the Open Ephys DataThread worker (never by the MCC callback).
+    // Wakes when MCC reports data/error, or when timeoutMilliseconds elapses.
+    // The consumer must still check the cumulative counter after waking.
+    void waitForData (double timeoutMilliseconds = 100.0);
+
+    // Interrupt the worker's wait before joining it during shutdown.
+    void wakeWorker();
+
     // Call from the acquisition worker, or after it stops.
     Statistics getStatistics() const;
 

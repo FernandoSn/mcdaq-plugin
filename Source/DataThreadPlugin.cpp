@@ -260,8 +260,12 @@ bool DataThreadPlugin::updateBuffer()
     if (! acquisition)
         return false;
 
-    // Temporary diagnostic interval.
-    Thread::sleep (20);
+    // Wait for an MCC notification instead of polling every 20 ms.
+    // Timeout also allows the DataThread to recheck its exit condition.
+    acquisition->waitForData (100.0);
+
+    if (threadShouldExit())
+        return true;
 
     if (! acquisition->consumeAvailable())
     {
@@ -323,6 +327,10 @@ bool DataThreadPlugin::stopAcquisition()
     if (isThreadRunning())
     {
         signalThreadShouldExit();
+
+        // Do not wait for the next MCC notification to exit promptly.
+        if (acquisition)
+            acquisition->wakeWorker();
 
         if (! waitForThreadToExit (2000))
         {
