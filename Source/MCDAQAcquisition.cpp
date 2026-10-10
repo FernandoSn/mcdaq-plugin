@@ -27,6 +27,11 @@ struct MCDAQAcquisition::Impl
     {
     }
 
+    RawBlockCallback rawBlockCallback = nullptr;
+    void* rawBlockUserData = nullptr;
+
+    uint64_t delivered = 0;
+
     int boardNumber;
 
     StopDiagnostics lastStop;
@@ -113,12 +118,26 @@ MCDAQAcquisition::~MCDAQAcquisition()
     stop();
 }
 
+void MCDAQAcquisition::setRawBlockCallback (
+    RawBlockCallback callback,
+    void* userData)
+{
+    // Configure only while acquisition is stopped.
+    if (impl_->running)
+        return;
+
+    impl_->rawBlockCallback = callback;
+    impl_->rawBlockUserData = userData;
+}
+
 int MCDAQAcquisition::start (long requestedRate)
 {
     if (impl_->running)
         return 0;
 
     impl_->lastStop = {};
+
+    impl_->delivered = 0;
 
     impl_->notifications.store (0);
     impl_->reportedCount.store (0);
@@ -281,9 +300,43 @@ bool MCDAQAcquisition::consumeAvailable()
 
             impl_->checksum += value;
         }
-
+        
         impl_->hasSamples = true;
+
+        // These samples were successfully copied out of UL.
+        const uint64_t firstSample = impl_->consumed;
+
         impl_->consumed += count;
+
+        // Forward the raw block to Open Ephys through our callback.
+        if (impl_->rawBlockCallback != nullptr)
+        {
+            const std::size_t accepted =
+                impl_->rawBlockCallback (
+                    impl_->scratch.data(),
+                    count,
+                    firstSample,
+                    impl_->rawBlockUserData);
+
+            // Protect against an invalid callback result.
+            if (accepted > count)
+            {
+                impl_->readError = -3;
+                impl_->possibleDataLoss = true;
+                return false;
+            }
+
+            impl_->delivered += accepted;
+
+            if (accepted != count)
+            {
+                // Open Ephys did not accept the entire block.
+                impl_->readError = -3;
+                impl_->possibleDataLoss = true;
+                return false;
+            }
+        }
+
     }
 
     return true;
@@ -436,6 +489,8 @@ MCDAQAcquisition::Statistics
     result.possibleDataLoss = impl_->possibleDataLoss;
 
     result.actualRate = impl_->actualRate;
+
+    result.totalSamplesDelivered = impl_->delivered;
 
     return result;
 }

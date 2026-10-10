@@ -52,6 +52,8 @@ public:
         bool possibleDataLoss = false;
 
         long actualRate = 0;
+
+        uint64_t totalSamplesDelivered = 0;
     };
 
     explicit MCDAQAcquisition (int boardNumber);
@@ -73,6 +75,16 @@ public:
     DriverStatus getDriverStatus() const;
 
     StopDiagnostics getStopDiagnostics() const;
+
+    using RawBlockCallback = std::size_t (*) (
+        const uint16_t* samples,
+        std::size_t count,
+        uint64_t firstSample,
+        void* userData);
+
+    void setRawBlockCallback (
+        RawBlockCallback callback,
+        void* userData);
 
 private:
     struct Impl;

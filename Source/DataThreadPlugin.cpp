@@ -108,13 +108,88 @@ bool DataThreadPlugin::foundInputSource()
     return deviceManager && deviceManager->getSelectedBoardNumber() >= 0;
 }
 
-void DataThreadPlugin::updateSettings (OwnedArray<ContinuousChannel>* continuousChannels,
-                                       OwnedArray<EventChannel>* eventChannels,
-                                       OwnedArray<SpikeChannel>* spikeChannels,
-                                       OwnedArray<DataStream>* sourceStreams,
-                                       OwnedArray<DeviceInfo>* devices,
-                                       OwnedArray<ConfigurationObject>* configurationObjects)
+void DataThreadPlugin::updateSettings (
+    OwnedArray<ContinuousChannel>* continuousChannels,
+    OwnedArray<EventChannel>* eventChannels,
+    OwnedArray<SpikeChannel>* spikeChannels,
+    OwnedArray<DataStream>* dataStreams,
+    OwnedArray<DeviceInfo>* devices,
+    OwnedArray<ConfigurationObject>* configurationObjects)
 {
+    continuousChannels->clear();
+    eventChannels->clear();
+    spikeChannels->clear();
+    dataStreams->clear();
+    devices->clear();
+    configurationObjects->clear();
+
+    if (! foundInputSource())
+        return;
+
+    const std::string product =
+        deviceManager->getSelectedProductName();
+
+    const std::string uniqueId =
+        deviceManager->getSelectedUniqueId();
+
+    const String streamName =
+        "MCDAQ " + String (product.c_str());
+
+    const String streamIdentifier =
+        "mcdaq-" + String (uniqueId.c_str());
+
+    // Temporary fixed acquisition settings:
+    // AI0, +/-10 V, 1000 samples/sec.
+    constexpr float sampleRate = 1000.0f;
+
+    DataStream::Settings streamSettings {
+        streamName,
+        "Analog input from MCC Universal Library",
+        streamIdentifier,
+        sampleRate,
+        true
+    };
+
+    auto* stream = new DataStream (streamSettings);
+    dataStreams->add (stream);
+
+    // Nominal voltage resolution for the two boards.
+    // We will validate scaling before recording.
+    const float bitVolts =
+        product == "USB-204"
+            ? 20.0f / 4096.0f
+            : 20.0f / 65536.0f;
+
+    ContinuousChannel::Settings channelSettings {
+        ContinuousChannel::Type::ADC,
+        "AI0",
+        "MCC analog input channel 0",
+        "mcdaq-ai0",
+        bitVolts,
+        stream
+    };
+
+    continuousChannels->add (
+        new ContinuousChannel (channelSettings));
+
+    // Placeholder event channel. Digital acquisition
+    // is not yet implemented.
+    EventChannel::Settings eventSettings {
+        EventChannel::Type::TTL,
+        "MCDAQ Digital Inputs",
+        "Reserved for future MCC digital acquisition",
+        "mcdaq-ttl",
+        stream,
+        8
+    };
+
+    eventChannels->add (
+        new EventChannel (eventSettings));
+
+    LOGC ("MCDAQ: Registered AI0 at ",
+          sampleRate,
+          " Hz | Nominal bitVolts: ",
+          bitVolts);
 }
 
 bool DataThreadPlugin::startAcquisition()
@@ -134,6 +209,10 @@ bool DataThreadPlugin::startAcquisition()
 
     acquisition =
         std::make_unique<MCDAQAcquisition> (boardNum);
+
+    acquisition->setRawBlockCallback (
+        &DataThreadPlugin::receiveRawBlock,
+        this);
 
     LOGC ("MCDAQ DEBUG 3: Calling MCC scan start");
 
@@ -161,6 +240,9 @@ bool DataThreadPlugin::startAcquisition()
           " S/s");
 
     LOGC ("MCDAQ DEBUG 5: Starting DataThread");
+
+    if (sourceBuffers.size() > 0)
+        sourceBuffers[0]->clear();
 
     startThread();
 
@@ -307,6 +389,13 @@ bool DataThreadPlugin::stopAcquisition()
 
 void DataThreadPlugin::resizeBuffers()
 {
+    sourceBuffers.clear();
+
+    if (foundInputSource())
+    {
+        // One channel, 10,000 sampling frames.
+        sourceBuffers.add (new DataBuffer (1, 10000));
+    }
 }
 
 std::unique_ptr<GenericEditor> DataThreadPlugin::createEditor (SourceNode* sn)
@@ -333,4 +422,79 @@ void DataThreadPlugin::registerParameters()
 void DataThreadPlugin::parameterValueChanged (Parameter* parameter)
 {
     // Handle parameter value changes here (e.g. update settings)
+}
+
+
+std::size_t DataThreadPlugin::receiveRawBlock (
+    const uint16_t* samples,
+    std::size_t count,
+    uint64_t firstSample,
+    void* userData)
+{
+    auto* plugin =
+        static_cast<DataThreadPlugin*> (userData);
+
+    if (plugin == nullptr)
+        return 0;
+
+    return plugin->forwardRawBlock (
+        samples,
+        count,
+        firstSample);
+}
+
+std::size_t DataThreadPlugin::forwardRawBlock (
+    const uint16_t* samples,
+    std::size_t count,
+    uint64_t firstSample)
+{
+    if (samples == nullptr || count == 0 || count > BLOCK_SIZE || sourceBuffers.size() == 0)
+    {
+        return 0;
+    }
+
+    // Temporary fixed configuration: +/-10 V.
+    const std::string product =
+        deviceManager->getSelectedProductName();
+
+    const bool is12Bit = product == "USB-204";
+
+    const int resolution = is12Bit ? 4096 : 65536;
+    const int midpoint = resolution / 2;
+
+    const float voltsPerCount =
+        20.0f / static_cast<float> (resolution);
+
+    constexpr double sampleRate = 1000.0;
+
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        const int centeredCode =
+            static_cast<int> (samples[i]) - midpoint;
+
+        voltageBlock[i] =
+            centeredCode * voltsPerCount;
+
+        const int64_t sampleNumber =
+            static_cast<int64_t> (firstSample + i);
+
+        sampleNumbers[i] = sampleNumber;
+
+        // Preliminary timebase: seconds since scan start.
+        timestamps[i] =
+            static_cast<double> (sampleNumber) / sampleRate;
+
+        // Digital inputs are not implemented yet.
+        eventCodes[i] = 0;
+    }
+
+    const auto accepted =
+        sourceBuffers[0]->addToBuffer (
+            voltageBlock.data(),
+            sampleNumbers.data(),
+            timestamps.data(),
+            eventCodes.data(),
+            static_cast<int> (count));
+
+    return static_cast<std::size_t> (accepted);
 }

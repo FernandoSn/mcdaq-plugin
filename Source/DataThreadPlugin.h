@@ -26,6 +26,9 @@
 
 #include <DataThreadHeaders.h>
 #include <memory>
+#include <array>
+#include <cstddef>
+#include <cstdint>
 
 class MCDAQDeviceManager;
 
@@ -92,6 +95,28 @@ private:
     std::unique_ptr<MCDAQDeviceManager> deviceManager;
     std::unique_ptr<MCDAQAcquisition> acquisition;
     unsigned int diagnosticTicks = 0;
+
+    
+    static constexpr std::size_t BLOCK_SIZE = 4096;
+
+    std::array<float, BLOCK_SIZE> voltageBlock {};
+    std::array<int64_t, BLOCK_SIZE> sampleNumbers {};
+    std::array<double, BLOCK_SIZE> timestamps {};
+    std::array<uint64_t, BLOCK_SIZE> eventCodes {};
+
+    // Called by MCDAQAcquisition's consumer,
+    // not directly by the MCC event callback.
+    static std::size_t receiveRawBlock (
+        const uint16_t* samples,
+        std::size_t count,
+        uint64_t firstSample,
+        void* userData);
+
+    std::size_t forwardRawBlock (
+        const uint16_t* samples,
+        std::size_t count,
+        uint64_t firstSample);
+
 
 };
 
