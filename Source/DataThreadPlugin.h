@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <cstdint>
 
 class MCDAQDeviceManager;
 
@@ -59,9 +60,16 @@ public:
     long getDeclaredSampleRateHz() const;
     bool setSampleRateHz (long rateHz);
     int getChannelCount() const noexcept { return selectedChannelCount; }
-    bool setChannelCount (int channelCount);
+    std::uint8_t getChannelMask() const noexcept { return selectedChannelMask; }
+    bool isChannelEnabled (int channel) const noexcept;
+    std::vector<int> getSelectedChannels() const;
+    bool setChannelMask (std::uint8_t mask);
+    // Input range is one shared setting, except USB-204 is fixed at +/-10 V.
+    int getVoltageRangeVolts() const noexcept { return selectedRangeVolts; }
+    bool canSelectVoltageRange() const;
+    bool setVoltageRangeVolts (int fullScaleVolts);
+    std::string getBoardName() const;
     std::vector<long> getAvailableRates() const;
-    std::vector<int> getAvailableChannelCounts() const;
     bool isSimultaneousSampling() const;
     std::string getSamplingModeDescription() const;
 
@@ -111,9 +119,11 @@ private:
     unsigned int diagnosticTicks = 0;
     long selectedSampleRateHz = 1000;
     int selectedChannelCount = 1;
+    std::uint8_t selectedChannelMask = 0x01; // AI0 initially enabled.
+    int selectedRangeVolts = 10;
     double activeSampleRateHz = 1000.0;
 
-    
+
     static constexpr std::size_t BLOCK_SIZE = 4096;
 
     std::array<float, BLOCK_SIZE> voltageBlock {};

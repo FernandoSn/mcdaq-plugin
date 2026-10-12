@@ -23,25 +23,45 @@ constexpr size_t COPY_CHUNK_POINTS = 4096;
 
 // Request approximately 32 ms of samples per event. MCC USB transfers
 // are packetized; a multiple of 32 is appropriate for these two boards.
-unsigned chooseNotificationPoints (long rate)
+// Round up to a multiple of both MCC USB packet sizes (64 points) and
+// the number of enabled analog inputs. This prevents an arbitrary channel
+// queue (e.g., 3, 5, 7 inputs) from straddling the ring wrap mid-frame.
+uint64_t gcd (uint64_t a, uint64_t b)
+{
+    while (b != 0) { const uint64_t rem = a % b; a = b; b = rem; }
+    return a;
+}
+
+uint64_t commonMultiple (uint64_t points, uint64_t channels)
+{
+    return points / gcd (points, channels) * channels;
+}
+
+uint64_t roundUp (uint64_t count, uint64_t alignment)
+{
+    return ((count + alignment - 1u) / alignment) * alignment;
+}
+
+unsigned chooseNotificationPoints (long rate, int channels)
 {
     const uint64_t desired =
         (static_cast<uint64_t> (rate) * 32u + 999u) / 1000u;
-    const uint64_t rounded = ((desired + 31u) / 32u) * 32u;
-    return static_cast<unsigned> ((std::max<uint64_t>) (
-        MIN_NOTIFICATION_POINTS, (std::min<uint64_t>) (rounded, 8192u)));
+    const uint64_t alignment = commonMultiple (32u, static_cast<uint64_t> (channels));
+    const uint64_t rounded = roundUp ((std::max<uint64_t>) (desired, MIN_NOTIFICATION_POINTS), alignment);
+    return rounded > 8192u ? 0u : static_cast<unsigned> (rounded);
 }
 
-// Aim for at least four seconds of hardware data, rounded up to a power
-// of two. The minimum preserves the already-tested ring-buffer capacity.
-long chooseBufferPoints (long rate)
+// Preserve tested powers of two for 1,2,4,8 channels. For other counts,
+// round slightly upward to a ring capacity divisible by 64 and channel count.
+long chooseBufferPoints (long rate, int channels)
 {
     const uint64_t desired = (std::max<uint64_t>) (
         MIN_BUFFER_POINTS, static_cast<uint64_t> (rate) * 4u);
     uint64_t capacity = MIN_BUFFER_POINTS;
     while (capacity < desired && capacity < MAX_BUFFER_POINTS)
         capacity *= 2u;
-    return desired > MAX_BUFFER_POINTS ? 0L : static_cast<long> (capacity);
+    capacity = roundUp (capacity, commonMultiple (64u, static_cast<uint64_t> (channels)));
+    return capacity > MAX_BUFFER_POINTS ? 0L : static_cast<long> (capacity);
 }
 } // namespace
 
@@ -206,29 +226,34 @@ void MCDAQAcquisition::setRawBlockCallback (
     impl_->rawBlockUserData = userData;
 }
 
-int MCDAQAcquisition::start (long requestedRate, int channelCount)
+int MCDAQAcquisition::start (long requestedRate, const std::vector<int>& channels, int rangeVolts)
 {
     if (impl_->running)
         return 0;
 
     // These are intentionally the first checks: avoid unbounded allocations
     // and never start with an invalid or unsupported rate.
+    const int channelCount = static_cast<int> (channels.size());
     if (requestedRate < 500 || requestedRate > 100000 ||
-        (channelCount != 1 && channelCount != 2 &&
-         channelCount != 4 && channelCount != 8))
+        channelCount < 1 || channelCount > 8 ||
+        (rangeVolts != 10 && rangeVolts != 5 && rangeVolts != 2 && rangeVolts != 1))
         return -4;
+    for (int index = 0; index < channelCount; ++index)
+        if (channels[index] < 0 || channels[index] >= 8 ||
+            (index > 0 && channels[index] <= channels[index - 1]))
+            return -4;
 
     // Both scan counters and circular-buffer positions are ADC points,
     // not timestamps/frames. Make all scan boundaries whole frames.
     const long aggregateRate = requestedRate * channelCount;
-    impl_->bufferPoints = chooseBufferPoints (aggregateRate);
-    impl_->notificationPoints = chooseNotificationPoints (aggregateRate);
+    impl_->bufferPoints = chooseBufferPoints (aggregateRate, channelCount);
+    impl_->notificationPoints = chooseNotificationPoints (aggregateRate, channelCount);
     impl_->channelCount = channelCount;
     impl_->trailingPartialPoints = 0;
     if (impl_->bufferPoints == 0 ||
+        impl_->notificationPoints == 0 ||
         impl_->bufferPoints % channelCount != 0 ||
-        impl_->notificationPoints % static_cast<unsigned> (channelCount) != 0 ||
-        COPY_CHUNK_POINTS % static_cast<size_t> (channelCount) != 0)
+        impl_->notificationPoints % static_cast<unsigned> (channelCount) != 0)
         return -4;
 
     impl_->lastStop = {};
@@ -269,6 +294,25 @@ int MCDAQAcquisition::start (long requestedRate, int channelCount)
     impl_->possibleDataLoss = false;
     impl_->readError = 0;
 
+    // Configure the hardware channel/gain queue on EVERY scan start.
+    // This also replaces any previous queue when the channel set changes.
+    // Both supported boards require unique, ascending channel numbers.
+    // USB-204 ignores gain because its input range is fixed at +/-10 V.
+    short channelQueue[8] {};
+    short gainQueue[8] {};
+    const short rangeCode = rangeVolts == 10 ? BIP10VOLTS :
+        rangeVolts == 5 ? BIP5VOLTS :
+        rangeVolts == 2 ? BIP2VOLTS : BIP1VOLTS;
+    for (int i = 0; i < channelCount; ++i)
+    {
+        channelQueue[i] = static_cast<short> (channels[i]);
+        gainQueue[i] = rangeCode;
+    }
+    const int queueError = cbALoadQueue (
+        impl_->boardNumber, channelQueue, gainQueue, channelCount);
+    if (queueError != 0)
+        return queueError;
+
     // Native 16-bit ADC sample buffer.
     impl_->buffer = cbWinBufAlloc (impl_->bufferPoints);
 
@@ -303,11 +347,11 @@ int MCDAQAcquisition::start (long requestedRate, int channelCount)
 
     error = cbAInScan (
         impl_->boardNumber,
-        0,
-        channelCount - 1,
+        channels.front(),
+        channels.back(),
         impl_->bufferPoints,
         &rate,
-        BIP10VOLTS,
+        rangeCode,
         impl_->buffer,
         options);
 
@@ -388,7 +432,7 @@ bool MCDAQAcquisition::consumeAvailable()
         return false;
     }
 
-    // MCC data are AI0,AI1,...,AI(N-1),AI0,... . Do not deliver a
+    // MCC data follow the ascending hardware channel queue. Do not deliver a
     // partial frame (even if the hardware count happens to end there).
     const uint64_t channels = static_cast<uint64_t> (impl_->channelCount);
     while (impl_->produced - impl_->consumed >= channels)
@@ -457,7 +501,7 @@ bool MCDAQAcquisition::consumeAvailable()
 
             impl_->checksum += value;
         }
-        
+
         impl_->hasSamples = true;
 
         // These samples were successfully copied out of UL.

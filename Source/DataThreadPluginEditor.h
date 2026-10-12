@@ -1,57 +1,34 @@
-/*
- ------------------------------------------------------------------
-
- This file is part of the Open Ephys GUI
- Copyright (C) 2022 Open Ephys
-
- ------------------------------------------------------------------
-
- This program is free software: you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation, either version 3 of the License, or
- (at your option) any later version.
-
- This program is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
-
- You should have received a copy of the GNU General Public License
- along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
- */
-
+/* MCDAQ Open Ephys editor: NI-style single-ended analog channel selection. */
 #ifndef DATATHREADPLUGINEDITOR_H_DEFINED
 #define DATATHREADPLUGINEDITOR_H_DEFINED
 
 #include <EditorHeaders.h>
-
 #include "DataThreadPlugin.h"
+#include <array>
 
 class DataThreadPluginEditor : public GenericEditor,
-                               private juce::ComboBox::Listener
+                               private juce::ComboBox::Listener,
+                               private juce::Button::Listener
 {
 public:
-    /** The class constructor, used to initialize any members. */
     DataThreadPluginEditor (GenericProcessor* parentNode, DataThreadPlugin* thread);
-
-    /** The class destructor, used to deallocate memory */
     ~DataThreadPluginEditor() override;
-
     void saveCustomParametersToXml (XmlElement* xml) override;
     void loadCustomParametersFromXml (XmlElement* xml) override;
 
 private:
     void comboBoxChanged (juce::ComboBox* box) override;
-    std::unique_ptr<juce::ComboBox> sampleRateSelector;
-    std::unique_ptr<juce::Label> sampleRateLabel;
-    std::unique_ptr<juce::ComboBox> channelSelector;
-    std::unique_ptr<juce::Label> channelLabel;
-    std::unique_ptr<juce::Label> samplingModeLabel;
-    void refreshSelectors();
+    void buttonClicked (juce::Button* button) override;
+    void refreshControls();
 
-    /** A pointer to the underlying DataThreadPlugin */
-    DataThreadPlugin* thread;
+    DataThreadPlugin* thread = nullptr;
+    std::array<std::unique_ptr<juce::TextButton>, 8> analogButtons;
+    std::unique_ptr<juce::ComboBox> sampleRateSelector;
+    std::unique_ptr<juce::ComboBox> voltageRangeSelector;
+    std::unique_ptr<juce::Label> sampleRateLabel;
+    std::unique_ptr<juce::Label> voltageRangeLabel;
+    std::unique_ptr<juce::Label> boardLabel;
+    std::unique_ptr<juce::Label> architectureLabel;
 };
 
 #endif

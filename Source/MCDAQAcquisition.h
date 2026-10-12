@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 class MCDAQAcquisition
 {
@@ -17,7 +18,7 @@ public:
         long currentIndex = -1;
     };
 
-    
+
     struct StopDiagnostics
     {
         int stopError = -1;
@@ -94,7 +95,7 @@ public:
 
     // Rate is samples/second PER CHANNEL; Count and UL callback counts
     // remain in aggregate, interleaved ADC points.
-    int start (long requestedRate = 1000, int channelCount = 1);
+    int start (long requestedRate, const std::vector<int>& channels, int rangeVolts);
     void stop();
 
     // Consume newly reported native ADC samples.

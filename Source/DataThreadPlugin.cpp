@@ -114,7 +114,7 @@ bool DataThreadPlugin::foundInputSource()
 
 namespace
 {
-constexpr long allowedRates[] = { 500, 1000, 2000, 10000, 25000, 30000 };
+constexpr long allowedRates[] = { 500, 1000, 2000, 5000, 10000, 25000, 30000 };
 bool allowedRate (long hz)
 {
     for (const long rate : allowedRates)
@@ -136,18 +136,67 @@ std::vector<long> DataThreadPlugin::getAvailableRates() const
     return result;
 }
 
-std::vector<int> DataThreadPlugin::getAvailableChannelCounts() const
+bool DataThreadPlugin::isChannelEnabled (int channel) const noexcept
+{
+    return channel >= 0 && channel < 8 &&
+           (selectedChannelMask & static_cast<std::uint8_t> (1u << channel)) != 0;
+}
+
+std::vector<int> DataThreadPlugin::getSelectedChannels() const
 {
     std::vector<int> result;
-    if (! deviceManager) return result;
-    const auto cap = deviceManager->getSelectedScanCapabilities();
-    if (! cap.supported) return result;
-    for (int channels : { 1, 2, 4, 8 })
-        if (channels <= cap.analogChannels &&
-            selectedSampleRateHz <= cap.maxPerChannelHz &&
-            static_cast<int64_t> (selectedSampleRateHz) * channels <= cap.maxAggregateHz)
-            result.push_back (channels);
+    for (int channel = 0; channel < 8; ++channel)
+        if (isChannelEnabled (channel))
+            result.push_back (channel);
     return result;
+}
+
+bool DataThreadPlugin::setChannelMask (std::uint8_t mask)
+{
+    if (CoreServices::getAcquisitionStatus() || acquisition || isThreadRunning() || mask == 0 || ! deviceManager)
+        return false;
+
+    const auto cap = deviceManager->getSelectedScanCapabilities();
+    if (! cap.supported || (mask >> cap.analogChannels) != 0)
+        return false;
+
+    int count = 0;
+    for (int channel = 0; channel < 8; ++channel)
+        if (mask & (1u << channel)) ++count;
+
+    if (selectedSampleRateHz > cap.maxPerChannelHz ||
+        static_cast<int64_t> (selectedSampleRateHz) * count > cap.maxAggregateHz)
+        return false;
+
+    selectedChannelMask = mask;
+    selectedChannelCount = count;
+    return true;
+}
+
+std::string DataThreadPlugin::getBoardName() const
+{
+    return deviceManager ? deviceManager->getSelectedProductName() : std::string();
+}
+
+bool DataThreadPlugin::canSelectVoltageRange() const
+{
+    return getBoardName() == "USB-1608FS-Plus";
+}
+
+bool DataThreadPlugin::setVoltageRangeVolts (int fullScaleVolts)
+{
+    if (CoreServices::getAcquisitionStatus() || acquisition || isThreadRunning())
+        return false;
+
+    if (fullScaleVolts != 10 && fullScaleVolts != 5 &&
+        fullScaleVolts != 2 && fullScaleVolts != 1)
+        return false;
+
+    if (! canSelectVoltageRange() && fullScaleVolts != 10)
+        return false;
+
+    selectedRangeVolts = fullScaleVolts;
+    return true;
 }
 
 bool DataThreadPlugin::setSampleRateHz (long rateHz)
@@ -160,20 +209,6 @@ bool DataThreadPlugin::setSampleRateHz (long rateHz)
         static_cast<int64_t> (rateHz) * selectedChannelCount > cap.maxAggregateHz)
         return false;
     selectedSampleRateHz = rateHz;
-    return true;
-}
-
-bool DataThreadPlugin::setChannelCount (int channelCount)
-{
-    if (CoreServices::getAcquisitionStatus() || acquisition || isThreadRunning() ||
-        (channelCount != 1 && channelCount != 2 && channelCount != 4 && channelCount != 8))
-        return false;
-    const auto cap = deviceManager->getSelectedScanCapabilities();
-    if (! cap.supported || channelCount > cap.analogChannels ||
-        selectedSampleRateHz > cap.maxPerChannelHz ||
-        static_cast<int64_t> (selectedSampleRateHz) * channelCount > cap.maxAggregateHz)
-        return false;
-    selectedChannelCount = channelCount;
     return true;
 }
 
@@ -238,7 +273,7 @@ void DataThreadPlugin::updateSettings (
     const String streamIdentifier =
         "mcdaq-" + String (uniqueId.c_str());
 
-    // One synchronous stream, channels AI0 through AI(N-1); +/-10 V.
+    // One synchronous stream; channel order follows the ascending MCC queue.
     const float sampleRate = static_cast<float> (getDeclaredSampleRateHz());
 
     DataStream::Settings streamSettings {
@@ -257,9 +292,9 @@ void DataThreadPlugin::updateSettings (
     const float bitVolts =
         product == "USB-204"
             ? 20.0f / 4096.0f
-            : 20.0f / 65536.0f;
+            : (2.0f * selectedRangeVolts) / 65536.0f;
 
-    for (int channel = 0; channel < selectedChannelCount; ++channel)
+    for (const int channel : getSelectedChannels())
     {
         const String number (channel);
         ContinuousChannel::Settings channelSettings {
@@ -287,12 +322,19 @@ void DataThreadPlugin::updateSettings (
     eventChannels->add (
         new EventChannel (eventSettings));
 
-    LOGC ("MCDAQ: Registered AI0-AI", selectedChannelCount - 1,
-          " (", selectedChannelCount, " channels) at ", sampleRate,
+    juce::String channelNames;
+    for (const int channel : getSelectedChannels())
+    {
+        if (channelNames.isNotEmpty()) channelNames += ",";
+        channelNames += "AI" + String (channel);
+    }
+    LOGC ("MCDAQ: Registered [", channelNames,
+          "] (", selectedChannelCount, " channels) at ", sampleRate,
           " Hz/channel | Aggregate nominal: ",
           sampleRate * selectedChannelCount,
           " points/s | Sampling: ", getSamplingModeDescription().c_str(),
-          " | Nominal bitVolts: ", bitVolts);
+          " | Input range: +/-", selectedRangeVolts,
+          " V | Nominal bitVolts: ", bitVolts);
 }
 
 bool DataThreadPlugin::startAcquisition()
@@ -319,7 +361,7 @@ bool DataThreadPlugin::startAcquisition()
 
     LOGC ("MCDAQ DEBUG 3: Calling MCC scan start");
 
-    const int error = acquisition->start (selectedSampleRateHz, selectedChannelCount);
+    const int error = acquisition->start (selectedSampleRateHz, getSelectedChannels(), selectedRangeVolts);
 
     LOGC ("MCDAQ DEBUG 4: MCC returned ", error);
 
@@ -478,7 +520,7 @@ bool DataThreadPlugin::stopAcquisition()
         }
     }
 
-    
+
     if (acquisition)
     {
         acquisition->stop();
@@ -628,7 +670,8 @@ std::size_t DataThreadPlugin::forwardRawBlock (
         count % n != 0 || firstSample % n != 0 || sourceBuffers.size() == 0)
         return 0;
 
-    // UL layout: [frame0_AI0,frame0_AI1,...,frame1_AI0,...].
+    // UL layout follows the configured ascending channel queue.
+    // Example mask AI0+AI6+AI7 -> [AI0,AI6,AI7,AI0,AI6,AI7,...].
     // Open Ephys v1.x expects channel-major blocks:
     // [all AI0 frames, all AI1 frames, ...].
     const size_t frames = count / n;
@@ -636,7 +679,9 @@ std::size_t DataThreadPlugin::forwardRawBlock (
     const bool is12Bit = deviceManager->getSelectedProductName() == "USB-204";
     const int resolution = is12Bit ? 4096 : 65536;
     const int midpoint = resolution / 2;
-    const float voltsPerCount = 20.0f / static_cast<float> (resolution);
+    const float voltsPerCount =
+        (2.0f * (is12Bit ? 10.0f : static_cast<float> (selectedRangeVolts))) /
+        static_cast<float> (resolution);
     const double sampleRate = activeSampleRateHz;
 
     for (size_t frame = 0; frame < frames; ++frame)
