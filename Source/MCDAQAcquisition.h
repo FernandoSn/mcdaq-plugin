@@ -95,6 +95,13 @@ public:
 
     // Rate is samples/second PER CHANNEL; Count and UL callback counts
     // remain in aggregate, interleaved ADC points.
+    // Perform a short, non-recorded UL scan to determine its actual clock
+    // before Open Ephys registers the stream. Must only run while idle.
+    // A successful result is checked again by start().
+    static int probeActualRate (int boardNumber, long requestedRate,
+                                const std::vector<int>& channels,
+                                int rangeVolts, long& actualRate);
+
     int start (long requestedRate, const std::vector<int>& channels, int rangeVolts);
     void stop();
 

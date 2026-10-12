@@ -77,8 +77,10 @@ void DataThreadPluginEditor::refreshControls()
     for (const long rate : thread->getAvailableRates())
     {
         juce::String title = juce::String (rate) + " Hz";
-        if (rate == 30000 && thread->getDeclaredSampleRateHz() == 30007)
-            title = "30000 Hz (actual 30007)";
+        if (rate == thread->getSampleRateHz() &&
+            thread->getDeclaredSampleRateHz() > 0 &&
+            rate != thread->getDeclaredSampleRateHz())
+            title += " (actual " + juce::String (thread->getDeclaredSampleRateHz()) + ")";
         sampleRateSelector->addItem (title, static_cast<int> (rate));
     }
     sampleRateSelector->setSelectedId (
@@ -112,7 +114,10 @@ void DataThreadPluginEditor::comboBoxChanged (juce::ComboBox* box)
 
     refreshControls();
     if (accepted)
+    {
         CoreServices::updateSignalChain (this);
+        refreshControls(); // Reflect newly negotiated actual clock.
+    }
 }
 
 void DataThreadPluginEditor::buttonClicked (juce::Button* button)
@@ -126,7 +131,10 @@ void DataThreadPluginEditor::buttonClicked (juce::Button* button)
         const bool accepted = thread->setChannelMask (nextMask);
         refreshControls(); // Reject attempts to disable the last channel.
         if (accepted)
+        {
             CoreServices::updateSignalChain (this);
+            refreshControls();
+        }
         return;
     }
 }

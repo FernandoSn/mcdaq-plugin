@@ -53,6 +53,32 @@ unsigned chooseNotificationPoints (long rate, int channels)
 
 // Preserve tested powers of two for 1,2,4,8 channels. For other counts,
 // round slightly upward to a ring capacity divisible by 64 and channel count.
+int configureChannelQueue (int boardNumber, const std::vector<int>& channels,
+                           int rangeVolts)
+{
+    const int n = static_cast<int> (channels.size());
+    if (n < 1 || n > 8 ||
+        (rangeVolts != 10 && rangeVolts != 5 &&
+         rangeVolts != 2 && rangeVolts != 1))
+        return -4;
+
+    short channelQueue[8] {};
+    short gainQueue[8] {};
+    const short rangeCode = rangeVolts == 10 ? BIP10VOLTS :
+        rangeVolts == 5 ? BIP5VOLTS :
+        rangeVolts == 2 ? BIP2VOLTS : BIP1VOLTS;
+
+    for (int i = 0; i < n; ++i)
+    {
+        if (channels[i] < 0 || channels[i] >= 8 ||
+            (i && channels[i] <= channels[i-1]))
+            return -4;
+        channelQueue[i] = static_cast<short> (channels[i]);
+        gainQueue[i] = rangeCode;
+    }
+    return cbALoadQueue (boardNumber, channelQueue, gainQueue, n);
+}
+
 long chooseBufferPoints (long rate, int channels)
 {
     const uint64_t desired = (std::max<uint64_t>) (
@@ -226,6 +252,58 @@ void MCDAQAcquisition::setRawBlockCallback (
     impl_->rawBlockUserData = userData;
 }
 
+int MCDAQAcquisition::probeActualRate (int boardNumber, long requestedRate,
+                                       const std::vector<int>& channels,
+                                       int rangeVolts, long& actualRate)
+{
+    actualRate = 0;
+    const int n = static_cast<int> (channels.size());
+    if (requestedRate < 500 || requestedRate > 100000 || n < 1 || n > 8)
+        return -4;
+
+    const long bufferPoints = chooseBufferPoints (requestedRate * n, n);
+    if (bufferPoints <= 0 || bufferPoints % n != 0)
+        return -4;
+
+    const int queueError = configureChannelQueue (boardNumber, channels, rangeVolts);
+    if (queueError != 0)
+        return queueError;
+
+    // Use the same configuration, buffering and scan options as a real
+    // acquisition. No event handler and no Open Ephys delivery are active.
+    HGLOBAL probeBuffer = cbWinBufAlloc (bufferPoints);
+    if (! probeBuffer)
+        return -1;
+
+    long rate = requestedRate;
+    const int error = cbAInScan (
+        boardNumber, channels.front(), channels.back(), bufferPoints, &rate,
+        rangeVolts == 10 ? BIP10VOLTS :
+            rangeVolts == 5 ? BIP5VOLTS :
+            rangeVolts == 2 ? BIP2VOLTS : BIP1VOLTS,
+        probeBuffer, BACKGROUND | CONTINUOUS | CONVERTDATA);
+
+    if (error != 0)
+    {
+        cbWinBufFree (probeBuffer);
+        return error;
+    }
+
+    const int stopError = cbStopBackground (boardNumber, AIFUNCTION);
+    if (stopError != 0)
+    {
+        // Do not free memory that an unsuccessfully stopped background scan
+        // may still be writing to. Fail closed rather than risk use-after-free.
+        return stopError;
+    }
+
+    cbWinBufFree (probeBuffer);
+    if (rate <= 0)
+        return -4;
+    actualRate = rate;
+    return 0;
+}
+
 int MCDAQAcquisition::start (long requestedRate, const std::vector<int>& channels, int rangeVolts)
 {
     if (impl_->running)
@@ -298,18 +376,11 @@ int MCDAQAcquisition::start (long requestedRate, const std::vector<int>& channel
     // This also replaces any previous queue when the channel set changes.
     // Both supported boards require unique, ascending channel numbers.
     // USB-204 ignores gain because its input range is fixed at +/-10 V.
-    short channelQueue[8] {};
-    short gainQueue[8] {};
     const short rangeCode = rangeVolts == 10 ? BIP10VOLTS :
         rangeVolts == 5 ? BIP5VOLTS :
         rangeVolts == 2 ? BIP2VOLTS : BIP1VOLTS;
-    for (int i = 0; i < channelCount; ++i)
-    {
-        channelQueue[i] = static_cast<short> (channels[i]);
-        gainQueue[i] = rangeCode;
-    }
-    const int queueError = cbALoadQueue (
-        impl_->boardNumber, channelQueue, gainQueue, channelCount);
+    const int queueError = configureChannelQueue (
+        impl_->boardNumber, channels, rangeVolts);
     if (queueError != 0)
         return queueError;
 

@@ -123,6 +123,16 @@ private:
     int selectedRangeVolts = 10;
     double activeSampleRateHz = 1000.0;
 
+    // Cached UL clock negotiation for the exact current board/queue/range.
+    // Invalidated by any settings change; never guess an actual clock.
+    bool rateNegotiated = false;
+    long negotiatedRateHz = 0;
+    long negotiatedRequestHz = 0;
+    std::uint8_t negotiatedChannelMask = 0;
+    int negotiatedRangeVolts = 0;
+    int negotiatedBoardNum = -1;
+    bool negotiateSelectedRate();
+
 
     static constexpr std::size_t BLOCK_SIZE = 4096;
 

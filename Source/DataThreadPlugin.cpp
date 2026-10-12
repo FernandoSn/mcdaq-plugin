@@ -170,6 +170,7 @@ bool DataThreadPlugin::setChannelMask (std::uint8_t mask)
 
     selectedChannelMask = mask;
     selectedChannelCount = count;
+    rateNegotiated = false;
     return true;
 }
 
@@ -196,6 +197,7 @@ bool DataThreadPlugin::setVoltageRangeVolts (int fullScaleVolts)
         return false;
 
     selectedRangeVolts = fullScaleVolts;
+    rateNegotiated = false;
     return true;
 }
 
@@ -209,6 +211,7 @@ bool DataThreadPlugin::setSampleRateHz (long rateHz)
         static_cast<int64_t> (rateHz) * selectedChannelCount > cap.maxAggregateHz)
         return false;
     selectedSampleRateHz = rateHz;
+    rateNegotiated = false;
     return true;
 }
 
@@ -226,21 +229,53 @@ std::string DataThreadPlugin::getSamplingModeDescription() const
 
 long DataThreadPlugin::getDeclaredSampleRateHz() const
 {
-    // Empirically observed at 1 channel on the USB-1608FS-Plus:
-    // requesting nominal 30000 Hz yielded 30007 Hz. This is the
-    // expected clock for multichannel scans too, NOT yet verified there.
-    // Since Open Ephys
-    // builds DataStream metadata before startAcquisition(), advertise
-    // the actual driver-reported rate from the outset.
-    //
-    // This is provisional device-specific clock calibration, not a
-    // blanket tolerance. If UL returns anything else when starting,
-    // acquisition is rejected rather than silently mis-timestamped.
-    if (selectedSampleRateHz == 30000 && deviceManager &&
-        deviceManager->getSelectedProductName() == "USB-1608FS-Plus")
-        return 30007;
+    if (! deviceManager || ! rateNegotiated ||
+        negotiatedRequestHz != selectedSampleRateHz ||
+        negotiatedChannelMask != selectedChannelMask ||
+        negotiatedRangeVolts != selectedRangeVolts ||
+        negotiatedBoardNum != deviceManager->getSelectedBoardNumber())
+        return 0; // Unknown: never advertise an assumed hardware rate.
 
-    return selectedSampleRateHz;
+    return negotiatedRateHz;
+}
+
+bool DataThreadPlugin::negotiateSelectedRate()
+{
+    if (getDeclaredSampleRateHz() > 0)
+        return true;
+    if (! deviceManager || ! foundInputSource() ||
+        CoreServices::getAcquisitionStatus() || acquisition || isThreadRunning())
+        return false;
+
+    const int boardNum = deviceManager->getSelectedBoardNumber();
+    long actualRate = 0;
+    const int error = MCDAQAcquisition::probeActualRate (
+        boardNum, selectedSampleRateHz, getSelectedChannels(),
+        selectedRangeVolts, actualRate);
+
+    if (error != 0 || actualRate <= 0)
+    {
+        rateNegotiated = false;
+        negotiatedRateHz = 0;
+        LOGE ("MCDAQ: Hardware clock preflight failed for ",
+              getBoardName().c_str(), " [", selectedChannelCount,
+              " channels] at nominal ", selectedSampleRateHz,
+              " Hz/channel. UL error: ", error,
+              ". Stream registration blocked to protect timestamps.");
+        return false;
+    }
+
+    negotiatedBoardNum = boardNum;
+    negotiatedRequestHz = selectedSampleRateHz;
+    negotiatedChannelMask = selectedChannelMask;
+    negotiatedRangeVolts = selectedRangeVolts;
+    negotiatedRateHz = actualRate;
+    rateNegotiated = true;
+    LOGC ("MCDAQ: Hardware clock negotiated: requested ",
+          selectedSampleRateHz, " Hz/channel | Actual ", actualRate,
+          " Hz/channel | Channels: ", selectedChannelCount,
+          " | Board: ", getBoardName().c_str());
+    return true;
 }
 
 void DataThreadPlugin::updateSettings (
@@ -258,7 +293,7 @@ void DataThreadPlugin::updateSettings (
     devices->clear();
     configurationObjects->clear();
 
-    if (! foundInputSource())
+    if (! foundInputSource() || ! negotiateSelectedRate())
         return;
 
     const std::string product =
@@ -341,9 +376,10 @@ bool DataThreadPlugin::startAcquisition()
 {
     LOGC ("MCDAQ DEBUG 1: Entered startAcquisition()");
 
-    if (! foundInputSource())
+    if (! foundInputSource() || getDeclaredSampleRateHz() <= 0)
     {
-        LOGE ("MCDAQ: No supported board selected.");
+        LOGE ("MCDAQ: No supported board or validated stream rate. "
+              "Change a setting to retry hardware clock negotiation.");
         return false;
     }
 
@@ -401,7 +437,7 @@ bool DataThreadPlugin::startAcquisition()
 
     if (selectedSampleRateHz != declaredRate)
         LOGC ("MCDAQ: Nominal selection ", selectedSampleRateHz,
-              " Hz matches the expected (and start-validated) MCC rate ",
+              " Hz matches the preflight-negotiated and start-validated MCC rate ",
               declaredRate, " Hz on this board.");
 
     LOGC ("MCDAQ: Continuous scan started. Board: ",
