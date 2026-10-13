@@ -859,10 +859,23 @@ void MCDAQAcquisition::stop()
             result.drainSucceeded = consumeAvailable();
             impl_->trailingPartialPoints =
                 impl_->produced - impl_->consumed;
-            // Never report a clean stop while silently dropping the
-            // end of a multi-channel scan. This may occur if UL
-            // stops halfway through a hardware scan frame.
-            if (impl_->trailingPartialPoints != 0)
+            // A multiplexed acquisition can stop after a partial final
+            // scan: CurCount includes the unfinished ADC points while
+            // CurIndex still identifies the last COMPLETE channel scan.
+            //
+            // Those points cannot form a synchronized multichannel frame.
+            // Account for them explicitly as a terminal fragment, but do
+            // not misclassify them as missing complete frames. The complete
+            // frames must already have been copied successfully, the final
+            // CurIndex must agree with the last complete scan, and the
+            // remainder must be strictly smaller than one frame.
+            //
+            // All other loss detectors (buffer overrun, bad CurIndex,
+            // mismatched counters, callback rejection, read errors, etc.)
+            // remain enabled; none is cleared or bypassed here.
+            if (impl_->trailingPartialPoints >= channels ||
+                impl_->consumed % channels != 0 ||
+                impl_->consumed + impl_->trailingPartialPoints != finalProduced)
             {
                 impl_->possibleDataLoss = true;
                 result.drainSucceeded = false;

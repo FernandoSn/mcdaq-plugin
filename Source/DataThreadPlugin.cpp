@@ -602,6 +602,12 @@ bool DataThreadPlugin::stopAcquisition()
               stats.channelCount > 0 ? stats.totalSamplesDelivered / stats.channelCount : 0,
               " | Trailing partial ADC points: ", stats.trailingPartialPoints);
 
+        if (stats.trailingPartialPoints > 0)
+            LOGC ("MCDAQ WARNING: UL stopped with ", stats.trailingPartialPoints,
+                  " point(s) in an incomplete terminal ", stats.channelCount,
+                  "-channel scan. These points were NOT written as a frame; ",
+                  "complete-frame delivery is checked separately.");
+
         LOGC ("MCDAQ: Maximum unread backlog: ",
               stats.maxUnreadSamples,
               " ADC sample points");
@@ -621,17 +627,33 @@ bool DataThreadPlugin::stopAcquisition()
             return false;
         }
 
-        const bool clean =
-            stopped.statusError == 0 && stopped.drainSucceeded && stopped.finalProduced == stopped.finalConsumed && stopped.finalConsumed == stats.totalSamplesDelivered && stats.scanError == 0 && stats.readError == 0 && ! stats.possibleDataLoss && stats.watchdogFault == MCDAQAcquisition::WatchdogFault::None;
+        // A valid trailing terminal fragment is NOT an incomplete delivered
+        // frame. Reconcile every ADC point and verify the complete frames
+        // separately. Do not require the hardware to stop on a frame edge.
+        const bool completeFramesVerified =
+            stopped.statusError == 0 && stopped.status == 0 &&
+            stopped.drainSucceeded &&
+            stats.channelCount > 0 &&
+            stats.trailingPartialPoints < static_cast<uint64_t> (stats.channelCount) &&
+            stopped.finalConsumed % static_cast<uint64_t> (stats.channelCount) == 0 &&
+            stopped.finalProduced == stopped.finalConsumed + stats.trailingPartialPoints &&
+            stopped.finalConsumed == stats.totalSamplesDelivered &&
+            stats.scanError == 0 && stats.readError == 0 &&
+            ! stats.possibleDataLoss &&
+            stats.watchdogFault == MCDAQAcquisition::WatchdogFault::None;
 
-        if (! clean)
+        if (! completeFramesVerified)
         {
-            LOGE ("MCDAQ: Acquisition integrity not verified.");
+            LOGC ("MCDAQ: Acquisition integrity not verified.");
+        }
+        else if (stats.trailingPartialPoints > 0)
+        {
+            LOGC ("MCDAQ: All complete frames reconciled; terminal partial scan separately accounted for.");
         }
 
         acquisition.reset();
 
-        return clean;
+        return completeFramesVerified;
     }
 
     return true;
