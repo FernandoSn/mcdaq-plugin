@@ -1,6 +1,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -124,6 +125,17 @@ public:
 
     // Call from the acquisition worker, or after it stops.
     Statistics getStatistics() const;
+
+    // Optional software-clock observations for DI only. The callback performs
+    // NO extra MCC calls and the analog delivery counters are unchanged.
+    struct TimingObservation
+    {
+        std::uint64_t sequence = 0;
+        std::uint32_t aggregatePointCount = 0;
+        std::chrono::steady_clock::time_point receivedAt {};
+    };
+    void enableTimingObservations (bool enable) noexcept;
+    bool latestTimingObservation (TimingObservation& out) const noexcept;
 
     DriverStatus getDriverStatus() const;
 

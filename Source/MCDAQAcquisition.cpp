@@ -118,6 +118,15 @@ struct MCDAQAcquisition::Impl
     // Written by the MCC callback.
     std::atomic<uint32_t> notifications { 0 };
     std::atomic<uint32_t> reportedCount { 0 };
+
+    // Optional digital-only callback timestamp mailbox. No locks, memory
+    // allocations or extra UL functions are executed in the MCC callback.
+    // Atomic flag prevents concurrent callbacks from publishing a torn pair.
+    std::atomic<bool> timingObservationsEnabled { false };
+    std::atomic_flag timingWriterBusy = ATOMIC_FLAG_INIT;
+    std::atomic<std::uint64_t> timingVersion { 0 }; // even = stable
+    std::atomic<std::uint32_t> timingCount { 0 };
+    std::atomic<std::int64_t> timingClockTicks { 0 };
     std::atomic<int> scanError { 0 };
     std::atomic<bool> scanErrorEventSeen { false };
     std::atomic<bool> unexpectedEndEventSeen { false };
@@ -178,6 +187,19 @@ struct MCDAQAcquisition::Impl
 
         if (eventType == ON_DATA_AVAILABLE)
         {
+            if (self->timingObservationsEnabled.load (std::memory_order_relaxed))
+            {
+                // One monotonic host-clock read, never a driver query.
+                const auto callbackTime = WatchClock::now().time_since_epoch().count();
+                if (!self->timingWriterBusy.test_and_set (std::memory_order_acquire))
+                {
+                    self->timingVersion.fetch_add (1, std::memory_order_acq_rel); // odd
+                    self->timingClockTicks.store (callbackTime, std::memory_order_relaxed);
+                    self->timingCount.store (eventData, std::memory_order_relaxed);
+                    self->timingVersion.fetch_add (1, std::memory_order_release); // even
+                    self->timingWriterBusy.clear (std::memory_order_release);
+                }
+            }
             self->reportedCount.store (
                 static_cast<uint32_t> (eventData),
                 std::memory_order_release);
@@ -238,6 +260,29 @@ MCDAQAcquisition::MCDAQAcquisition (int boardNumber)
 MCDAQAcquisition::~MCDAQAcquisition()
 {
     stop();
+}
+
+void MCDAQAcquisition::enableTimingObservations (bool enable) noexcept
+{
+    // Enable only during plugin setup before cbAInScan has been called.
+    impl_->timingObservationsEnabled.store (enable, std::memory_order_release);
+}
+
+bool MCDAQAcquisition::latestTimingObservation (TimingObservation& out) const noexcept
+{
+    // Do not spin on the MCC callback. A missed observation is harmless for
+    // the long-term fit; retry on the next digital poll.
+    const auto startVersion = impl_->timingVersion.load (std::memory_order_acquire);
+    if (startVersion == 0 || (startVersion & 1u) != 0) return false;
+    const auto count = impl_->timingCount.load (std::memory_order_relaxed);
+    const auto ticks = impl_->timingClockTicks.load (std::memory_order_relaxed);
+    const auto finishVersion = impl_->timingVersion.load (std::memory_order_acquire);
+    if (startVersion != finishVersion || ticks == 0) return false;
+    out.sequence = finishVersion / 2;
+    out.aggregatePointCount = count;
+    out.receivedAt = std::chrono::steady_clock::time_point (
+        std::chrono::steady_clock::duration (ticks));
+    return true;
 }
 
 void MCDAQAcquisition::setRawBlockCallback (

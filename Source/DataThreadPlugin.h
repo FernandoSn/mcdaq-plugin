@@ -30,6 +30,7 @@
 #include <thread>
 #include <chrono>
 #include "MCDAQDigitalTimeline.h"
+#include "MCDAQDigitalClockEstimator.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -159,6 +160,9 @@ private:
     // DIO is software-polled, NOT ADC-clock-synchronous on these two boards.
     // The dedicated worker never touches the analog ring buffers.
     MCDAQDigitalTimeline digitalTimeline;
+    // Digital-only relative-clock estimator (fed by existing MCC callbacks).
+    // Does not affect the analog rate used for sample timestamps/metadata.
+    MCDAQDigitalClockEstimator digitalClockEstimator;
     std::thread digitalPollThread;
     std::atomic<bool> digitalPollStop { true };
     std::atomic<int> digitalPollError { 0 };

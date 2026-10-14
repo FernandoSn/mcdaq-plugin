@@ -514,6 +514,7 @@ bool DataThreadPlugin::startAcquisition()
     acquisition->setRawBlockCallback (
         &DataThreadPlugin::receiveRawBlock,
         this);
+    acquisition->enableTimingObservations (selectedDigitalMask != 0);
 
     // Digital input selection is opt-in. Configure the selected AUXPORT bits
     // and read the baseline BEFORE starting analog acquisition. This avoids
@@ -627,6 +628,8 @@ bool DataThreadPlugin::startAcquisition()
     // approximate software reference, NOT an ADC-latched frame-zero time.
     digitalTimeline.reset (selectedDigitalMask, initialDigitalPort,
                            activeSampleRateHz, analogStartEnd);
+    digitalClockEstimator.reset (activeSampleRateHz, selectedChannelCount,
+                                 analogStartEnd);
     digitalPollError.store (0);
     digitalPollCount.store (0);
     digitalMaxPollGapUs.store (0);
@@ -783,6 +786,18 @@ bool DataThreadPlugin::stopAcquisition()
     stopDigitalPoller();
     if (selectedDigitalMask != 0)
     {
+        const auto clock = digitalClockEstimator.diagnostics();
+        LOGC ("MCDAQ: DI online clock fit: callback samples=", clock.callbacksReceived,
+              " | Decimated observations=", clock.acceptedObservations,
+              " | Accepted fits=", clock.acceptedFits,
+              " | Rejected fits=", clock.rejectedFits,
+              " | Fit span (s)=", String (clock.fitSpanSeconds, 1),
+              " | Fitted correction (ppm)=", String (clock.estimatedCorrectionPpm, 3),
+              " | Applied correction (ppm)=", String (clock.appliedCorrectionPpm, 3),
+              " | Slope uncertainty (ppm)=", String (clock.fitUncertaintyPpm, 3),
+              " | Calibrated=", clock.calibrated,
+              " | Fallbacks=", clock.fallbackCount,
+              ". Analog timestamps and metadata UNCHANGED.");
         const auto d = digitalTimeline.getDiagnostics();
         LOGC ("MCDAQ: DI polling: reads=", digitalPollCount.load(),
               " | Max inter-read gap (us)=", digitalMaxPollGapUs.load(),
@@ -1029,9 +1044,30 @@ void DataThreadPlugin::runDigitalPoller() noexcept
 {
     using Clock = MCDAQDigitalTimeline::Clock;
     auto previousReadTime = Clock::now();
+    std::uint64_t lastClockObservationSeq = 0;
     bool firstRead = true;
     while (! digitalPollStop.load())
     {
+        // Read ONLY the atomic callback mailbox: no MCC calls, no locks,
+        // no work in the analog consumer, no changes to ADC samples.
+        MCDAQAcquisition::TimingObservation clockObservation;
+        if (acquisition != nullptr &&
+            acquisition->latestTimingObservation (clockObservation) &&
+            clockObservation.sequence != lastClockObservationSeq)
+        {
+            lastClockObservationSeq = clockObservation.sequence;
+            double correctedDigitalRate = 0.0;
+            if (digitalClockEstimator.observeCallback (
+                    clockObservation.aggregatePointCount,
+                    clockObservation.receivedAt, correctedDigitalRate))
+                digitalTimeline.updateRelativeClockRate (
+                    Clock::now(), correctedDigitalRate);
+        }
+        double fallbackRate = 0.0;
+        const auto now = Clock::now();
+        if (digitalClockEstimator.maintainFallback (now, fallbackRate))
+            digitalTimeline.updateRelativeClockRate (now, fallbackRate);
+
         std::uint8_t port = 0;
         const auto readBegin = Clock::now();
         const int err = deviceManager->readSelectedDigitalPort (port);

@@ -46,6 +46,9 @@ public:
         emittedState_ = observedState_;
         sampleRateHz_ = rateHz;
         analogStart_ = approximateAnalogStart;
+        anchorFrame_ = 0.0;
+        haveTransition_ = false;
+        lastTransitionFrame_ = 0;
         previousPollTime_ = approximateAnalogStart;
         nextFrame_ = 0;
         queue_.clear();
@@ -88,12 +91,30 @@ public:
             diagnostics_.meanEdgeObservationWindowUs +=
                 (static_cast<double> (windowUs) - diagnostics_.meanEdgeObservationWindowUs) / count;
         }
-        const auto seconds = std::chrono::duration<double> (
-            estimatedTransition - analogStart_).count();
-        const double frame = std::max (0.0, seconds * sampleRateHz_);
-        const auto index = static_cast<std::uint64_t> (std::min (
+        const double frame = (std::max) (0.0, mapFrame (estimatedTransition));
+        auto index = static_cast<std::uint64_t> ((std::min) (
             frame, static_cast<double> (std::numeric_limits<std::uint64_t>::max() / 2)));
+        // Never let an online rate update reorder queued transitions.
+        if (haveTransition_ && index < lastTransitionFrame_)
+            index = lastTransitionFrame_;
+        lastTransitionFrame_ = index;
+        haveTransition_ = true;
         queue_.push_back ({ index, next });
+    }
+
+    // Called from the digital poller, never the analog acquisition callback.
+    // Preserve continuity at every recalibration: no jumps in event sample
+    // position when a newly estimated relative clock rate is adopted.
+    bool updateRelativeClockRate (TimePoint when, double newFramesPerSecond)
+    {
+        if (!std::isfinite(newFramesPerSecond) || newFramesPerSecond <= 0.0)
+            return false;
+        std::lock_guard<std::mutex> lock (mutex_);
+        if (when < analogStart_) return false;
+        anchorFrame_ = mapFrame (when);
+        analogStart_ = when;
+        sampleRateHz_ = newFramesPerSecond;
+        return true;
     }
 
     // Call ONLY from the analog data-delivery thread; the poller only calls
@@ -136,6 +157,11 @@ public:
     }
 
 private:
+    double mapFrame (TimePoint when) const
+    {
+        return anchorFrame_ + std::chrono::duration<double> (when - analogStart_).count() * sampleRateHz_;
+    }
+
     struct Change { std::uint64_t frame; std::uint8_t state; };
     static constexpr std::size_t maxQueuedTransitions = 8192;
     mutable std::mutex mutex_;
@@ -144,7 +170,10 @@ private:
     std::uint8_t observedState_ = 0;
     std::uint8_t emittedState_ = 0;
     double sampleRateHz_ = 1000.0;
+    double anchorFrame_ = 0.0;
     TimePoint analogStart_ {};
+    bool haveTransition_ = false;
+    std::uint64_t lastTransitionFrame_ = 0;
     TimePoint previousPollTime_ {};
     std::uint64_t nextFrame_ = 0;
     Diagnostics diagnostics_ {};
