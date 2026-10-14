@@ -1,5 +1,7 @@
 #include "DataThreadPluginEditor.h"
 
+#include <cmath>
+
 DataThreadPluginEditor::DataThreadPluginEditor (GenericProcessor* parentNode, DataThreadPlugin* plugin)
     : GenericEditor (parentNode), thread (plugin)
 {
@@ -78,9 +80,11 @@ void DataThreadPluginEditor::refreshControls()
     {
         juce::String title = juce::String (rate) + " Hz";
         if (rate == thread->getSampleRateHz() &&
-            thread->getDeclaredSampleRateHz() > 0 &&
-            rate != thread->getDeclaredSampleRateHz())
-            title += " (actual " + juce::String (thread->getDeclaredSampleRateHz()) + ")";
+            thread->getDeclaredSampleRateHz() > 0.0 &&
+            std::abs (static_cast<double> (rate) -
+                      thread->getDeclaredSampleRateHz()) > 0.001)
+            title += " (pacer " +
+                juce::String (thread->getDeclaredSampleRateHz(), 3) + ")";
         sampleRateSelector->addItem (title, static_cast<int> (rate));
     }
     sampleRateSelector->setSelectedId (

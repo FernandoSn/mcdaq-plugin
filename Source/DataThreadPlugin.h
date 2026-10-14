@@ -31,7 +31,6 @@
 #include <cstdint>
 #include <string>
 #include <vector>
-#include <cstdint>
 
 class MCDAQDeviceManager;
 
@@ -56,8 +55,9 @@ public:
 
     // Sampling rate is per channel; hardware limits depend on board and N.
     long getSampleRateHz() const noexcept { return selectedSampleRateHz; }
-    // Hardware clock rate advertised to Open Ephys before streaming begins.
-    long getDeclaredSampleRateHz() const;
+    // Precise nominal programmed hardware clock (Hz/channel).
+    // Valid only after successful UL preflight for the selected configuration.
+    double getDeclaredSampleRateHz() const;
     bool setSampleRateHz (long rateHz);
     int getChannelCount() const noexcept { return selectedChannelCount; }
     std::uint8_t getChannelMask() const noexcept { return selectedChannelMask; }
@@ -123,10 +123,14 @@ private:
     int selectedRangeVolts = 10;
     double activeSampleRateHz = 1000.0;
 
-    // Cached UL clock negotiation for the exact current board/queue/range.
-    // Invalidated by any settings change; never guess an actual clock.
+    // Cache both the MCC-reported integer rate and the divider-derived
+    // nominal clock for the exact current board, queue, range and request.
+    // The integer UL rate validates preflight vs. actual scan; the precise
+    // rate is used for OE metadata and sample timestamps.
     bool rateNegotiated = false;
-    long negotiatedRateHz = 0;
+    long negotiatedRateHz = 0; // UL-reported, for start consistency check
+    double negotiatedPreciseRateHz = 0.0; // nominal timer-derived
+    std::uint32_t negotiatedClockDivider = 0;
     long negotiatedRequestHz = 0;
     std::uint8_t negotiatedChannelMask = 0;
     int negotiatedRangeVolts = 0;

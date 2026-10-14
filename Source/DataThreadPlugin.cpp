@@ -27,6 +27,10 @@
 // Include MCC-specific definitions after Open Ephys headers
 #include "MCDAQDeviceManager.h"
 #include "MCDAQAcquisition.h"
+#include "MCDAQClock.h"
+
+#include <algorithm>
+#include <cmath>
 
 // Set to 1 when detailed acquisition diagnostics are needed.
 #define MCDAQ_VERBOSE_ACQUISITION_LOGS 0
@@ -253,21 +257,21 @@ std::string DataThreadPlugin::getSamplingModeDescription() const
     return cap.simultaneous ? "Simultaneous ADCs" : "Multiplexed (sequential ADC)";
 }
 
-long DataThreadPlugin::getDeclaredSampleRateHz() const
+double DataThreadPlugin::getDeclaredSampleRateHz() const
 {
     if (! deviceManager || ! rateNegotiated ||
         negotiatedRequestHz != selectedSampleRateHz ||
         negotiatedChannelMask != selectedChannelMask ||
         negotiatedRangeVolts != selectedRangeVolts ||
         negotiatedBoardNum != deviceManager->getSelectedBoardNumber())
-        return 0; // Unknown: never advertise an assumed hardware rate.
+        return 0.0; // Unknown: never advertise an unvalidated stream rate.
 
-    return negotiatedRateHz;
+    return negotiatedPreciseRateHz;
 }
 
 bool DataThreadPlugin::negotiateSelectedRate()
 {
-    if (getDeclaredSampleRateHz() > 0)
+    if (getDeclaredSampleRateHz() > 0.0)
         return true;
     if (! deviceManager || ! foundInputSource() ||
         CoreServices::getAcquisitionStatus() || acquisition || isThreadRunning())
@@ -283,6 +287,8 @@ bool DataThreadPlugin::negotiateSelectedRate()
     {
         rateNegotiated = false;
         negotiatedRateHz = 0;
+        negotiatedPreciseRateHz = 0.0;
+        negotiatedClockDivider = 0;
         LOGE ("MCDAQ: Hardware clock preflight failed for ",
               getBoardName().c_str(), " [", selectedChannelCount,
               " channels] at nominal ", selectedSampleRateHz,
@@ -291,16 +297,64 @@ bool DataThreadPlugin::negotiateSelectedRate()
         return false;
     }
 
+    // MCC's Rate parameter is an integer, and its USB-204 return values do
+    // not reproduce the hardware's programmed timer. Preserve that integer
+    // for the preflight/start consistency check, but register a precise
+    // hardware-derived nominal rate in Open Ephys instead.
+    const auto clock = predictMCDAQClock (
+        getBoardName(), selectedSampleRateHz, selectedChannelCount);
+
+    if (! clock.valid)
+    {
+        rateNegotiated = false;
+        negotiatedRateHz = 0;
+        negotiatedPreciseRateHz = 0.0;
+        negotiatedClockDivider = 0;
+        LOGE ("MCDAQ: No supported internal-clock model for ",
+              getBoardName().c_str(), " (", selectedChannelCount,
+              " channels, request ", selectedSampleRateHz, " Hz).");
+        return false;
+    }
+
+    // Guard against a future UL version using substantially different scan
+    // command generation. This does not read the timer register at runtime:
+    // a new driver still requires USB capture validation of the divider model.
+    constexpr double maxRelativeULDisagreement = 0.005; // 0.5%
+    const double permittedDifferenceHz = (std::max) (
+        2.0, maxRelativeULDisagreement * clock.nominalRateHz);
+
+    if (std::abs (static_cast<double> (actualRate) - clock.nominalRateHz) >
+            permittedDifferenceHz)
+    {
+        rateNegotiated = false;
+        negotiatedRateHz = 0;
+        negotiatedPreciseRateHz = 0.0;
+        negotiatedClockDivider = 0;
+        LOGE ("MCDAQ: UL-reported rate ", actualRate,
+              " Hz is incompatible with the nominal timer prediction for ",
+              getBoardName().c_str(), " at ", selectedSampleRateHz,
+              " Hz/channel (", selectedChannelCount,
+              " channels). Refusing to register an unverified clock.");
+        return false;
+    }
+
     negotiatedBoardNum = boardNum;
     negotiatedRequestHz = selectedSampleRateHz;
     negotiatedChannelMask = selectedChannelMask;
     negotiatedRangeVolts = selectedRangeVolts;
     negotiatedRateHz = actualRate;
+    negotiatedPreciseRateHz = clock.nominalRateHz;
+    negotiatedClockDivider = clock.timerDivider;
     rateNegotiated = true;
-    LOGC ("MCDAQ: Hardware clock negotiated: requested ",
-          selectedSampleRateHz, " Hz/channel | Actual ", actualRate,
-          " Hz/channel | Channels: ", selectedChannelCount,
-          " | Board: ", getBoardName().c_str());
+
+    LOGC ("MCDAQ: Clock preflight: requested ", selectedSampleRateHz,
+          " Hz/channel | MCC returned ", actualRate,
+          " Hz/channel | Nominal pacer ",
+          String (clock.nominalRateHz, 6), " Hz/channel | Divider ",
+          clock.timerDivider, " (register ", clock.registerValue,
+          ") | Oscillator ", static_cast<int64_t> (clock.oscillatorHz),
+          " Hz | Channels ", selectedChannelCount,
+          " | Board ", getBoardName().c_str());
     return true;
 }
 
@@ -335,6 +389,8 @@ void DataThreadPlugin::updateSettings (
         "mcdaq-" + String (uniqueId.c_str());
 
     // One synchronous stream; channel order follows the ascending MCC queue.
+    // Open Ephys DataStream::Settings stores float; sample timestamps below
+    // use the corresponding full-precision double nominal pacer rate.
     const float sampleRate = static_cast<float> (getDeclaredSampleRateHz());
 
     DataStream::Settings streamSettings {
@@ -402,7 +458,7 @@ bool DataThreadPlugin::startAcquisition()
 {
     LOGC ("MCDAQ DEBUG 1: Entered startAcquisition()");
 
-    if (! foundInputSource() || getDeclaredSampleRateHz() <= 0)
+    if (! foundInputSource() || getDeclaredSampleRateHz() <= 0.0)
     {
         LOGE ("MCDAQ: No supported board or validated stream rate. "
               "Change a setting to retry hardware clock negotiation.");
@@ -440,16 +496,17 @@ bool DataThreadPlugin::startAcquisition()
 
     const auto stats = acquisition->getStatistics();
 
-    // Metadata has already been registered with Open Ephys. Require
-    // the driver-reported rate to match it exactly; do not relax this
-    // safety check just because MCC rounds its hardware clock.
-    const long declaredRate = getDeclaredSampleRateHz();
-    if (stats.actualRate != declaredRate)
+    // Metadata has already been registered with Open Ephys at the
+    // predicted precise nominal rate. The preflight and real scan must
+    // still return IDENTICAL UL integer rates for this same request.
+    // Never compare UL's rounded rate directly with our precise rate.
+    const double declaredRate = getDeclaredSampleRateHz();
+    if (stats.actualRate != negotiatedRateHz || declaredRate <= 0.0)
     {
-        LOGE ("MCDAQ: UL selected ", stats.actualRate,
-              " Hz; Open Ephys stream declares ", declaredRate,
-              " Hz (nominal request: ", selectedSampleRateHz,
-              " Hz). Acquisition cancelled to protect timestamps.");
+        LOGE ("MCDAQ: UL rate changed between preflight and start: ",
+              "preflight ", negotiatedRateHz, " Hz, scan ", stats.actualRate,
+              " Hz. Stream nominal pacer rate ", String (declaredRate, 6),
+              " Hz/channel. Acquisition cancelled to protect timestamps.");
         acquisition->stop();
         const auto stopped = acquisition->getStopDiagnostics();
         if (stopped.stopError == 0 && stopped.disableEventError == 0)
@@ -459,19 +516,22 @@ bool DataThreadPlugin::startAcquisition()
         return false;
     }
 
-    activeSampleRateHz = static_cast<double> (stats.actualRate);
+    // Must agree with updateSettings(): the same precise rate controls the
+    // DataStream metadata and every sample timestamp sent to Open Ephys.
+    activeSampleRateHz = declaredRate;
 
-    if (selectedSampleRateHz != declaredRate)
-        LOGC ("MCDAQ: Nominal selection ", selectedSampleRateHz,
-              " Hz matches the preflight-negotiated and start-validated MCC rate ",
-              declaredRate, " Hz on this board.");
+    LOGC ("MCDAQ: Scan clock validated. Requested ", selectedSampleRateHz,
+          " Hz/channel | MCC reported ", stats.actualRate,
+          " Hz/channel | Nominal pacer / OE timestamps ",
+          String (activeSampleRateHz, 6),
+          " Hz/channel | Divider ", negotiatedClockDivider);
 
     LOGC ("MCDAQ: Continuous scan started. Board: ",
           boardNum,
-          " | Actual rate: ",
-          stats.actualRate,
+          " | Nominal hardware rate: ",
+          String (activeSampleRateHz, 6),
           " Hz/channel | Channels: ", stats.channelCount,
-          " | Aggregate: ", stats.actualRate * stats.channelCount,
+          " | Aggregate: ", String (activeSampleRateHz * stats.channelCount, 3),
           " ADC points/s | Mode: ", getSamplingModeDescription().c_str(),
           " | UL buffer: ", stats.bufferPoints,
           " points | MCC event: ", stats.notificationPoints,
