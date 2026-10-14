@@ -621,10 +621,12 @@ bool DataThreadPlugin::startAcquisition()
     if (sourceBuffers.size() > 0)
         sourceBuffers[0]->clear();
 
-    // The host software-polling epoch is placed midway through UL start();
-    // USB latency and Windows scheduling make its absolute phase uncertain.
+    // Digital-only host time anchor: use the completion of the existing
+    // cbAInScan start call. Do not issue extra cbGetStatus queries at startup;
+    // the analog acquisition/event path must remain untouched. This is an
+    // approximate software reference, NOT an ADC-latched frame-zero time.
     digitalTimeline.reset (selectedDigitalMask, initialDigitalPort,
-        activeSampleRateHz, analogStartBegin + (analogStartEnd - analogStartBegin) / 2);
+                           activeSampleRateHz, analogStartEnd);
     digitalPollError.store (0);
     digitalPollCount.store (0);
     digitalMaxPollGapUs.store (0);
@@ -643,10 +645,14 @@ bool DataThreadPlugin::startAcquisition()
             acquisition.reset();
             return false;
         }
+        const auto ulStartCallMs = std::chrono::duration<double, std::milli> (
+            analogStartEnd - analogStartBegin).count();
         LOGC ("MCDAQ: DI0-DI7 input monitoring ACTIVE (mask=0x",
               String::toHexString (static_cast<int> (selectedDigitalMask)),
               "). Target poll interval 2 ms, SYSTEM-PACED, NOT synchronous ",
-              "with analog. Short pulses may be missed; event times are approximate.");
+              "with analog. Short pulses may be missed; event times are approximate. ",
+              "DI host/ADC anchor=scan-start return; start-call duration=",
+              String (ulStartCallMs, 3), " ms; no extra startup UL status calls.");
     }
 
     startThread();
@@ -786,7 +792,11 @@ bool DataThreadPlugin::stopAcquisition()
               " | Pending at stop=", static_cast<int> (d.queuedTransitions),
               " | Collisions=", d.unrepresentableTransitions,
               " | Overflows=", d.queueOverflows,
-              " | UL read error=", digitalPollError.load());
+              " | UL read error=", digitalPollError.load(),
+              " | Mean edge observation window (us)=",
+              String (d.meanEdgeObservationWindowUs, 1),
+              " | Max edge observation window (us)=",
+              d.maxEdgeObservationWindowUs);
     }
 
     if (acquisition)
@@ -1023,6 +1033,7 @@ void DataThreadPlugin::runDigitalPoller() noexcept
     while (! digitalPollStop.load())
     {
         std::uint8_t port = 0;
+        const auto readBegin = Clock::now();
         const int err = deviceManager->readSelectedDigitalPort (port);
         const auto readTime = Clock::now();
         if (err != 0)
@@ -1046,7 +1057,7 @@ void DataThreadPlugin::runDigitalPoller() noexcept
         firstRead = false;
         previousReadTime = readTime;
         ++digitalPollCount;
-        digitalTimeline.observe (port, readTime);
+        digitalTimeline.observe (port, readBegin, readTime);
 
         // Windows and USB round-trip latency determine the actual poll rate.
         // This target is not a hardware acquisition clock.

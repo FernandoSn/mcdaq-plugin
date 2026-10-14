@@ -29,6 +29,10 @@ public:
         std::uint64_t unrepresentableTransitions = 0;
         std::uint64_t queueOverflows = 0;
         std::size_t queuedTransitions = 0;
+        // Per-transition interval between the two reads bracketing a change.
+        // This represents software timing uncertainty, not a hardware guarantee.
+        std::uint64_t maxEdgeObservationWindowUs = 0;
+        double meanEdgeObservationWindowUs = 0.0;
     };
 
     void reset (std::uint8_t selectedMask,
@@ -42,15 +46,25 @@ public:
         emittedState_ = observedState_;
         sampleRateHz_ = rateHz;
         analogStart_ = approximateAnalogStart;
+        previousPollTime_ = approximateAnalogStart;
         nextFrame_ = 0;
         queue_.clear();
         diagnostics_ = {};
     }
 
-    void observe (std::uint8_t rawPortValue, TimePoint observationTime)
+    // A digital transition occurred between two observed port states.
+    // Assign the midpoint between their observed times (read-call midpoints),
+    // rather than the *completion* of the detecting USB call. The actual
+    // electrical edge remains unlatched and cannot be reconstructed exactly.
+    void observe (std::uint8_t rawPortValue, TimePoint readBegin, TimePoint readEnd)
     {
         std::lock_guard<std::mutex> lock (mutex_);
         ++diagnostics_.observations;
+        if (readEnd < readBegin)
+            return;
+        const TimePoint readMidpoint = readBegin + (readEnd - readBegin) / 2;
+        const TimePoint previousTime = previousPollTime_;
+        previousPollTime_ = readMidpoint;
         const std::uint8_t next = rawPortValue & enabledMask_;
         if (next == observedState_)
             return;
@@ -62,8 +76,20 @@ public:
             ++diagnostics_.queueOverflows;
             return; // The caller must stop the stream rather than lose edges silently.
         }
+        const TimePoint estimatedTransition = previousTime + (readMidpoint - previousTime) / 2;
+        const auto windowUs = std::chrono::duration_cast<std::chrono::microseconds> (
+            readMidpoint - previousTime).count();
+        if (windowUs > 0)
+        {
+            const auto gapUs = static_cast<std::uint64_t> (windowUs);
+            diagnostics_.maxEdgeObservationWindowUs =
+                (std::max) (diagnostics_.maxEdgeObservationWindowUs, gapUs);
+            const double count = static_cast<double> (diagnostics_.transitionsObserved);
+            diagnostics_.meanEdgeObservationWindowUs +=
+                (static_cast<double> (windowUs) - diagnostics_.meanEdgeObservationWindowUs) / count;
+        }
         const auto seconds = std::chrono::duration<double> (
-            observationTime - analogStart_).count();
+            estimatedTransition - analogStart_).count();
         const double frame = std::max (0.0, seconds * sampleRateHz_);
         const auto index = static_cast<std::uint64_t> (std::min (
             frame, static_cast<double> (std::numeric_limits<std::uint64_t>::max() / 2)));
@@ -119,6 +145,7 @@ private:
     std::uint8_t emittedState_ = 0;
     double sampleRateHz_ = 1000.0;
     TimePoint analogStart_ {};
+    TimePoint previousPollTime_ {};
     std::uint64_t nextFrame_ = 0;
     Diagnostics diagnostics_ {};
 };
