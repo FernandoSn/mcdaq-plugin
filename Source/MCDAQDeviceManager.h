@@ -59,6 +59,20 @@ public:
     std::string getSelectedUniqueId() const;
     ScanCapabilities getSelectedScanCapabilities() const;
 
+    // Diagnostic: enable the USB-1608FS-Plus internal ADC pacer on SYNC.
+    // Used only on the selected USB-1608FS-Plus; no InstaCal dependency.
+    // The returned errors are MCC Universal Library error codes (0 = OK).
+    // getError stays -1 if the readback was not attempted.
+    struct SyncOutputResult
+    {
+        int setError = -1;
+        int getError = -1;
+        int readback = -1;
+        bool enabled = false;
+    };
+
+    SyncOutputResult enableSelectedSyncOutput();
+
     // Diagnostic: read one analog input in volts.
     // Not intended for continuous acquisition.
     int readAnalogVoltage (int channel, float& volts) const;

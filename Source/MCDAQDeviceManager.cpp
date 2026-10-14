@@ -301,6 +301,35 @@ MCDAQDeviceManager::getSelectedScanCapabilities() const
     return {};
 }
 
+MCDAQDeviceManager::SyncOutputResult
+MCDAQDeviceManager::enableSelectedSyncOutput()
+{
+    SyncOutputResult result;
+    std::lock_guard<std::mutex> lock (reservationMutex());
+
+    // SYNC is a bidirectional pacer pin on the USB-1608FS-Plus.
+    // Do not apply this configuration to the USB-204 or other boards.
+    if (impl_->selectedBoardNumber < 0 ||
+        impl_->selectedProductName != "USB-1608FS-Plus")
+        return result;
+
+    const int boardNum = impl_->selectedBoardNumber;
+
+    // The plug-in uses cbIgnoreInstaCal(), so configure this setting
+    // explicitly on the dynamically registered logical board.
+    result.setError = cbSetConfig (
+        BOARDINFO, boardNum, 0, BIINPUTPACEROUT, ENABLED);
+
+    if (result.setError != 0)
+        return result;
+
+    result.getError = cbGetConfig (
+        BOARDINFO, boardNum, 0, BIINPUTPACEROUT, &result.readback);
+
+    result.enabled = (result.getError == 0 && result.readback == ENABLED);
+    return result;
+}
+
 int MCDAQDeviceManager::readAnalogVoltage (
     int channel,
     float& volts) const

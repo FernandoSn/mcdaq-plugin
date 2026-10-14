@@ -78,6 +78,32 @@ DataThreadPlugin::DataThreadPlugin (SourceNode* sn)
               " | Unique ID: ",
               id.c_str());
 
+        // Diagnostic clock-output experiment. Keep this separate from the
+        // normal acquisition path; it only configures the 1608 SYNC pin.
+        // Change this to false after the timing experiment if SYNC output
+        // is not needed for routine recordings.
+        constexpr bool enable1608SyncForClockTest = true;
+        if (enable1608SyncForClockTest && name == "USB-1608FS-Plus")
+        {
+            const auto sync = deviceManager->enableSelectedSyncOutput();
+
+            if (sync.enabled)
+            {
+                LOGC ("MCDAQ: USB-1608FS-Plus SYNC output ENABLED and "
+                      "verified (BIINPUTPACEROUT=", sync.readback,
+                      ", board ", deviceManager->getSelectedBoardNumber(),
+                      "). Internal pacer should appear on SYNC while scanning.");
+            }
+            else
+            {
+                LOGE ("MCDAQ: USB-1608FS-Plus SYNC output NOT verified. "
+                      "cbSetConfig error=", sync.setError,
+                      ", cbGetConfig error=", sync.getError,
+                      ", readback=", sync.readback,
+                      ". Analog acquisition remains available.");
+            }
+        }
+
         float voltage = 0.0f;
 
         const int readError =
