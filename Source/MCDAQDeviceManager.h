@@ -3,6 +3,7 @@
 
 #include <memory>
 #include <string>
+#include <cstdint>
 #include <vector>
 
 class MCDAQDeviceManager
@@ -26,7 +27,7 @@ public:
         bool supported = false;
         bool simultaneous = false;
         int analogChannels = 0;
-        int digitalChannels = 0; // Individually configurable DIO pins, not yet recorded.
+        int digitalChannels = 0; // Software-readable AUXPORT DIO pins.
         long maxPerChannelHz = 0;
         long maxAggregateHz = 0;
     };
@@ -73,6 +74,11 @@ public:
     };
 
     SyncOutputResult enableSelectedSyncOutput();
+
+    // Both supported boards expose an 8-bit AUXPORT; configure only the
+    // selected bits as inputs, leaving other bits' direction untouched.
+    int configureSelectedDigitalInputs (std::uint8_t selectedMask) const;
+    int readSelectedDigitalPort (std::uint8_t& portValue) const;
 
     // Diagnostic: read one analog input in volts.
     // Not intended for continuous acquisition.

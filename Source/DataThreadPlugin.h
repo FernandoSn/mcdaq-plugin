@@ -26,6 +26,10 @@
 
 #include <DataThreadHeaders.h>
 #include <memory>
+#include <atomic>
+#include <thread>
+#include <chrono>
+#include "MCDAQDigitalTimeline.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -64,6 +68,9 @@ public:
     int getAnalogInputCount() const;
     int getDigitalInputCount() const;
     std::uint8_t getChannelMask() const noexcept { return selectedChannelMask; }
+    std::uint8_t getDigitalMask() const noexcept { return selectedDigitalMask; }
+    bool isDigitalEnabled (int channel) const noexcept;
+    bool setDigitalMask (std::uint8_t mask);
     bool isChannelEnabled (int channel) const noexcept;
     std::vector<int> getSelectedChannels() const;
     bool setChannelMask (std::uint8_t mask);
@@ -123,6 +130,7 @@ private:
     long selectedSampleRateHz = 1000;
     int selectedChannelCount = 1;
     std::uint8_t selectedChannelMask = 0x01; // AI0 initially enabled.
+    std::uint8_t selectedDigitalMask = 0x00; // All DI inputs opt-in.
     int selectedRangeVolts = 10;
     double activeSampleRateHz = 1000.0;
 
@@ -147,6 +155,17 @@ private:
     std::array<int64_t, BLOCK_SIZE> sampleNumbers {};
     std::array<double, BLOCK_SIZE> timestamps {};
     std::array<uint64_t, BLOCK_SIZE> eventCodes {};
+
+    // DIO is software-polled, NOT ADC-clock-synchronous on these two boards.
+    // The dedicated worker never touches the analog ring buffers.
+    MCDAQDigitalTimeline digitalTimeline;
+    std::thread digitalPollThread;
+    std::atomic<bool> digitalPollStop { true };
+    std::atomic<int> digitalPollError { 0 };
+    std::atomic<std::uint64_t> digitalPollCount { 0 };
+    std::atomic<std::uint64_t> digitalMaxPollGapUs { 0 };
+    void runDigitalPoller() noexcept;
+    void stopDigitalPoller() noexcept;
 
     // Layout: consecutive frames for AI0, then AI1, etc. The output
     // array is 4096 ADC points regardless of selected channel count.

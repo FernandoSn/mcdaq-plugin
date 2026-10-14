@@ -330,6 +330,31 @@ MCDAQDeviceManager::enableSelectedSyncOutput()
     return result;
 }
 
+int MCDAQDeviceManager::configureSelectedDigitalInputs (std::uint8_t selectedMask) const
+{
+    const int boardNum = getSelectedBoardNumber();
+    if (boardNum < 0) return -1;
+    for (int channel = 0; channel < 8; ++channel)
+    {
+        if ((selectedMask & static_cast<std::uint8_t> (1u << channel)) == 0)
+            continue;
+        const int error = cbDConfigBit (boardNum, AUXPORT, channel, DIGITALIN);
+        if (error != 0) return error;
+    }
+    return 0;
+}
+
+int MCDAQDeviceManager::readSelectedDigitalPort (std::uint8_t& portValue) const
+{
+    portValue = 0;
+    const int boardNum = getSelectedBoardNumber();
+    if (boardNum < 0) return -1;
+    unsigned short value = 0;
+    const int error = cbDIn (boardNum, AUXPORT, &value);
+    if (error == 0) portValue = static_cast<std::uint8_t> (value & 0xffu);
+    return error;
+}
+
 int MCDAQDeviceManager::readAnalogVoltage (
     int channel,
     float& volts) const

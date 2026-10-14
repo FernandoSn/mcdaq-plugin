@@ -5,8 +5,7 @@
 namespace
 {
 // NI-DAQmx-style channel control. The small round lamp shows whether an
-// analog channel is selected. Digital controls stay visually disabled until
-// MCDAQ actually acquires and timestamps digital input transitions.
+// analog / digital input is selected. DIO is software-polled (not paced by ADC).
 class MCDAQChannelButton final : public juce::TextButton
 {
 public:
@@ -101,11 +100,11 @@ DataThreadPluginEditor::DataThreadPluginEditor (GenericProcessor* parentNode,
         digital->setBounds (channel < 4 ? digitalFirstX : digitalSecondX,
                             firstRowY + (channel % 4) * channelRowPitch,
                             digitalButtonWidth, channelButtonHeight);
-        digital->setTooltip ("DIO" + juce::String (channel) +
-            " can be used as a digital input. Acquisition and timestamps "
-            "are not yet implemented; this control is a placeholder.");
-        digital->setToggleState (false, juce::dontSendNotification);
-        digital->setEnabled (false);
+        digital->setTooltip ("Enable/disable TTL input DI" +
+            juce::String (channel) +
+            ". SOFTWARE-POLLED, not synchronized to the analog clock; "
+            "short pulses can be missed and event timestamps are approximate.");
+        digital->addListener (this);
         addAndMakeVisible (*digital);
         digitalButtons[static_cast<std::size_t> (channel)] = std::move (digital);
     }
@@ -170,6 +169,8 @@ DataThreadPluginEditor::~DataThreadPluginEditor()
     voltageRangeSelector->removeListener (this);
     for (auto& button : analogButtons)
         if (button) button->removeListener (this);
+    for (auto& button : digitalButtons)
+        if (button) button->removeListener (this);
 }
 
 void DataThreadPluginEditor::refreshControls()
@@ -183,11 +184,12 @@ void DataThreadPluginEditor::refreshControls()
         analog->setToggleState (channel < analogCount && thread->isChannelEnabled (channel),
                                 juce::dontSendNotification);
 
-        // Digital is strictly presentation-only until acquisition exists.
         auto& digital = digitalButtons[static_cast<std::size_t> (channel)];
         digital->setVisible (channel < digitalCount);
-        digital->setToggleState (false, juce::dontSendNotification);
-        digital->setEnabled (false);
+        digital->setToggleState (channel < digitalCount && thread->isDigitalEnabled (channel),
+                                 juce::dontSendNotification);
+        digital->setEnabled (channel < digitalCount &&
+                             ! CoreServices::getAcquisitionStatus());
     }
 
     sampleRateSelector->clear (juce::dontSendNotification);
@@ -218,7 +220,7 @@ void DataThreadPluginEditor::refreshControls()
     architectureLabel->setText (
         juce::String (thread->isSimultaneousSampling() ? "Simultaneous" : "Multiplexed") +
         " | " + juce::String (analogCount) + " AI | " +
-        juce::String (digitalCount) + " DI (pending)",
+        juce::String (digitalCount) + " DI (polled)",
         juce::dontSendNotification);
 }
 
@@ -257,6 +259,21 @@ void DataThreadPluginEditor::buttonClicked (juce::Button* button)
         }
         return;
     }
+    for (int channel = 0; channel < 8; ++channel)
+    {
+        if (button != digitalButtons[static_cast<std::size_t> (channel)].get())
+            continue;
+        const auto nextMask = static_cast<std::uint8_t> (
+            thread->getDigitalMask() ^ static_cast<std::uint8_t> (1u << channel));
+        const bool accepted = thread->setDigitalMask (nextMask);
+        refreshControls();
+        if (accepted)
+        {
+            CoreServices::updateSignalChain (this);
+            refreshControls();
+        }
+        return;
+    }
 }
 
 void DataThreadPluginEditor::saveCustomParametersToXml (XmlElement* xml)
@@ -264,6 +281,7 @@ void DataThreadPluginEditor::saveCustomParametersToXml (XmlElement* xml)
     if (! xml) return;
     xml->setAttribute ("sample_rate_hz", static_cast<int> (thread->getSampleRateHz()));
     xml->setAttribute ("ai_channel_mask", static_cast<int> (thread->getChannelMask()));
+    xml->setAttribute ("di_channel_mask", static_cast<int> (thread->getDigitalMask()));
     xml->setAttribute ("input_range_volts", thread->getVoltageRangeVolts());
 }
 
@@ -279,6 +297,8 @@ void DataThreadPluginEditor::loadCustomParametersFromXml (XmlElement* xml)
             ? ((1 << previousCount) - 1) : 1;
     }
     thread->setChannelMask (static_cast<std::uint8_t> (channelMask));
+    thread->setDigitalMask (static_cast<std::uint8_t> (
+        xml->getIntAttribute ("di_channel_mask", 0)));
     thread->setSampleRateHz (xml->getIntAttribute ("sample_rate_hz", 1000));
     thread->setVoltageRangeVolts (xml->getIntAttribute ("input_range_volts", 10));
     refreshControls();

@@ -31,6 +31,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
+#include <thread>
+#include <system_error>
 
 // Set to 1 when detailed acquisition diagnostics are needed.
 #define MCDAQ_VERBOSE_ACQUISITION_LOGS 0
@@ -134,6 +137,7 @@ DataThreadPlugin::DataThreadPlugin (SourceNode* sn)
 
 DataThreadPlugin::~DataThreadPlugin()
 {
+    stopDigitalPoller();
 }
 
 bool DataThreadPlugin::foundInputSource()
@@ -170,6 +174,26 @@ bool DataThreadPlugin::isChannelEnabled (int channel) const noexcept
 {
     return channel >= 0 && channel < 8 &&
            (selectedChannelMask & static_cast<std::uint8_t> (1u << channel)) != 0;
+}
+
+bool DataThreadPlugin::isDigitalEnabled (int channel) const noexcept
+{
+    return channel >= 0 && channel < 8 &&
+           (selectedDigitalMask & static_cast<std::uint8_t> (1u << channel)) != 0;
+}
+
+bool DataThreadPlugin::setDigitalMask (std::uint8_t mask)
+{
+    if (CoreServices::getAcquisitionStatus() || acquisition || isThreadRunning() || ! deviceManager)
+        return false;
+
+    const auto cap = deviceManager->getSelectedScanCapabilities();
+    if (! cap.supported || cap.digitalChannels < 0 ||
+        (static_cast<unsigned> (mask) >> cap.digitalChannels) != 0u)
+        return false;
+
+    selectedDigitalMask = mask; // zero disables digital polling entirely.
+    return true;
 }
 
 std::vector<int> DataThreadPlugin::getSelectedChannels() const
@@ -435,12 +459,13 @@ void DataThreadPlugin::updateSettings (
         continuousChannels->add (new ContinuousChannel (channelSettings));
     }
 
-    // Placeholder event channel. Digital acquisition
-    // is not yet implemented.
+    // SourceNode converts changes in the sample-level TTL state word into
+    // edge events. These events are from SOFTWARE-POLLED AUXPORT reads, not
+    // hardware-synchronous reads. The unselected DI lines are forced low.
     EventChannel::Settings eventSettings {
         EventChannel::Type::TTL,
-        "MCDAQ Digital Inputs",
-        "Reserved for future MCC digital acquisition",
+        "MCDAQ Digital Inputs (polled)",
+        "Software-polled MCC AUXPORT inputs; approximate event timing",
         "mcdaq-ttl",
         stream,
         8
@@ -461,7 +486,10 @@ void DataThreadPlugin::updateSettings (
           sampleRate * selectedChannelCount,
           " points/s | Sampling: ", getSamplingModeDescription().c_str(),
           " | Input range: +/-", selectedRangeVolts,
-          " V | Nominal bitVolts: ", bitVolts);
+          " V | Nominal bitVolts: ", bitVolts,
+          " | DI selected mask: 0x",
+          String::toHexString (static_cast<int> (selectedDigitalMask)),
+          " (software-polled; not ADC-synchronous)");
 }
 
 bool DataThreadPlugin::startAcquisition()
@@ -487,9 +515,32 @@ bool DataThreadPlugin::startAcquisition()
         &DataThreadPlugin::receiveRawBlock,
         this);
 
+    // Digital input selection is opt-in. Configure the selected AUXPORT bits
+    // and read the baseline BEFORE starting analog acquisition. This avoids
+    // USB register configuration calls on the analog worker.
+    std::uint8_t initialDigitalPort = 0;
+    if (selectedDigitalMask != 0)
+    {
+        const int configError = deviceManager->configureSelectedDigitalInputs (selectedDigitalMask);
+        const int readError = configError == 0
+            ? deviceManager->readSelectedDigitalPort (initialDigitalPort)
+            : configError;
+        if (readError != 0)
+        {
+            LOGE ("MCDAQ: Cannot enable selected DI channels; UL error ", readError,
+                  ". Analog acquisition was not started. Disable DI or investigate the port.");
+            acquisition.reset();
+            return false;
+        }
+    }
+
     LOGC ("MCDAQ DEBUG 3: Calling MCC scan start");
 
+    // Approximate host-clock anchor only. MCC does not provide a digital
+    // latch timestamp, so DI->AI timing MUST NOT be treated as sample-accurate.
+    const auto analogStartBegin = MCDAQDigitalTimeline::Clock::now();
     const int error = acquisition->start (selectedSampleRateHz, getSelectedChannels(), selectedRangeVolts);
+    const auto analogStartEnd = MCDAQDigitalTimeline::Clock::now();
 
     LOGC ("MCDAQ DEBUG 4: MCC returned ", error);
 
@@ -500,6 +551,24 @@ bool DataThreadPlugin::startAcquisition()
 
         acquisition.reset();
         return false;
+    }
+
+    // Confirm that AUXPORT reads also work with the analog scan already
+    // running. A few device/driver combinations may refuse concurrent reads.
+    if (selectedDigitalMask != 0)
+    {
+        std::uint8_t livePort = 0;
+        const int concurrentReadError = deviceManager->readSelectedDigitalPort (livePort);
+        if (concurrentReadError != 0)
+        {
+            LOGE ("MCDAQ: AUXPORT read failed during analog scan (UL ",
+                  concurrentReadError, "). Stopping: DI cannot be monitored safely.");
+            acquisition->stop();
+            const auto stopped = acquisition->getStopDiagnostics();
+            if (stopped.stopError == 0 && stopped.disableEventError == 0)
+                acquisition.reset();
+            return false;
+        }
     }
 
     diagnosticTicks = 0;
@@ -552,6 +621,34 @@ bool DataThreadPlugin::startAcquisition()
     if (sourceBuffers.size() > 0)
         sourceBuffers[0]->clear();
 
+    // The host software-polling epoch is placed midway through UL start();
+    // USB latency and Windows scheduling make its absolute phase uncertain.
+    digitalTimeline.reset (selectedDigitalMask, initialDigitalPort,
+        activeSampleRateHz, analogStartBegin + (analogStartEnd - analogStartBegin) / 2);
+    digitalPollError.store (0);
+    digitalPollCount.store (0);
+    digitalMaxPollGapUs.store (0);
+    if (selectedDigitalMask != 0)
+    {
+        digitalPollStop.store (false);
+        try
+        {
+            digitalPollThread = std::thread (&DataThreadPlugin::runDigitalPoller, this);
+        }
+        catch (const std::system_error& e)
+        {
+            digitalPollStop.store (true);
+            LOGE ("MCDAQ: Cannot start digital input polling thread: ", e.what());
+            acquisition->stop();
+            acquisition.reset();
+            return false;
+        }
+        LOGC ("MCDAQ: DI0-DI7 input monitoring ACTIVE (mask=0x",
+              String::toHexString (static_cast<int> (selectedDigitalMask)),
+              "). Target poll interval 2 ms, SYSTEM-PACED, NOT synchronous ",
+              "with analog. Short pulses may be missed; event times are approximate.");
+    }
+
     startThread();
 
     LOGC ("MCDAQ DEBUG 6: DataThread started");
@@ -571,6 +668,29 @@ bool DataThreadPlugin::updateBuffer()
 
     if (threadShouldExit())
         return true;
+
+    // Do not continue silently if an enabled digital channel's USB read
+    // fails, if the poller is scheduled out for too long, or if transitions
+    // cannot be represented in the stream.
+    if (selectedDigitalMask != 0)
+    {
+        const auto d = digitalTimeline.getDiagnostics();
+        const int readError = digitalPollError.load();
+        // A 50ms blind spot is unacceptable even for our explicitly
+        // low-precision, software-polled TTL mode. The ordinary poll
+        // interval may still miss sub-interval pulses: never claim otherwise.
+        if (readError != 0 || d.queueOverflows != 0 ||
+            d.unrepresentableTransitions != 0 ||
+            digitalMaxPollGapUs.load() > 50000)
+        {
+            LOGE ("MCDAQ: Digital input integrity failure: UL error=", readError,
+                  " | Queue overruns=", d.queueOverflows,
+                  " | Unrepresentable edges=", d.unrepresentableTransitions,
+                  " | Max poll gap (us)=", digitalMaxPollGapUs.load(),
+                  ". Stop acquisition and inspect wiring/poll settings.");
+            return false;
+        }
+    }
 
     if (! acquisition->consumeAvailable() || ! acquisition->checkWatchdog())
     {
@@ -653,6 +773,22 @@ bool DataThreadPlugin::stopAcquisition()
     }
 
 
+    // Stop the independent AUXPORT USB reader before the analog final drain.
+    stopDigitalPoller();
+    if (selectedDigitalMask != 0)
+    {
+        const auto d = digitalTimeline.getDiagnostics();
+        LOGC ("MCDAQ: DI polling: reads=", digitalPollCount.load(),
+              " | Max inter-read gap (us)=", digitalMaxPollGapUs.load(),
+              " | Transitions observed=", d.transitionsObserved,
+              " | Transitions mapped=", d.transitionsEmitted,
+              " | Late placements=", d.lateTransitions,
+              " | Pending at stop=", static_cast<int> (d.queuedTransitions),
+              " | Collisions=", d.unrepresentableTransitions,
+              " | Overflows=", d.queueOverflows,
+              " | UL read error=", digitalPollError.load());
+    }
+
     if (acquisition)
     {
         acquisition->stop();
@@ -726,7 +862,14 @@ bool DataThreadPlugin::stopAcquisition()
         // A valid trailing terminal fragment is NOT an incomplete delivered
         // frame. Reconcile every ADC point and verify the complete frames
         // separately. Do not require the hardware to stop on a frame edge.
+        const auto digitalSummary = digitalTimeline.getDiagnostics();
+        const bool digitalIntegrityVerified = selectedDigitalMask == 0 ||
+            (digitalPollError.load() == 0 &&
+             digitalSummary.queueOverflows == 0 &&
+             digitalSummary.unrepresentableTransitions == 0 &&
+             digitalMaxPollGapUs.load() <= 50000);
         const bool completeFramesVerified =
+            digitalIntegrityVerified &&
             stopped.statusError == 0 && stopped.status == 0 &&
             stopped.drainSucceeded &&
             stats.channelCount > 0 &&
@@ -740,7 +883,7 @@ bool DataThreadPlugin::stopAcquisition()
 
         if (! completeFramesVerified)
         {
-            LOGC ("MCDAQ: Acquisition integrity not verified.");
+            LOGC ("MCDAQ: Acquisition integrity not verified (analog and/or DI).");
         }
         else if (stats.trailingPartialPoints > 0)
         {
@@ -838,12 +981,19 @@ std::size_t DataThreadPlugin::forwardRawBlock (
         static_cast<float> (resolution);
     const double sampleRate = activeSampleRateHz;
 
+    // Fill the TTL state word from separately captured AUXPORT transitions.
+    // SourceNode generates actual TTL edge events from changes in this word.
+    // Mask 0 retains exactly the previous all-zero analog-only behavior.
+    if (selectedDigitalMask != 0)
+        digitalTimeline.fill (firstFrame, frames, eventCodes.data());
+    else
+        std::fill_n (eventCodes.begin(), frames, std::uint64_t { 0 });
+
     for (size_t frame = 0; frame < frames; ++frame)
     {
         const int64_t sampleNumber = static_cast<int64_t> (firstFrame + frame);
         sampleNumbers[frame] = sampleNumber;
         timestamps[frame] = static_cast<double> (sampleNumber) / sampleRate;
-        eventCodes[frame] = 0; // Digital inputs not yet implemented.
 
         for (size_t channel = 0; channel < n; ++channel)
         {
@@ -862,4 +1012,51 @@ std::size_t DataThreadPlugin::forwardRawBlock (
         return 0; // The acquisition engine latches this as a delivery failure.
 
     return count; // Report accepted ADC points, not frames.
+}
+
+
+void DataThreadPlugin::runDigitalPoller() noexcept
+{
+    using Clock = MCDAQDigitalTimeline::Clock;
+    auto previousReadTime = Clock::now();
+    bool firstRead = true;
+    while (! digitalPollStop.load())
+    {
+        std::uint8_t port = 0;
+        const int err = deviceManager->readSelectedDigitalPort (port);
+        const auto readTime = Clock::now();
+        if (err != 0)
+        {
+            digitalPollError.store (err);
+            break; // An enabled DI channel must never fail silently.
+        }
+
+        if (! firstRead)
+        {
+            const auto gap = std::chrono::duration_cast<std::chrono::microseconds> (
+                readTime - previousReadTime).count();
+            if (gap > 0)
+            {
+                const auto gapUs = static_cast<std::uint64_t> (gap);
+                auto currentMax = digitalMaxPollGapUs.load();
+                while (gapUs > currentMax &&
+                       ! digitalMaxPollGapUs.compare_exchange_weak (currentMax, gapUs)) {}
+            }
+        }
+        firstRead = false;
+        previousReadTime = readTime;
+        ++digitalPollCount;
+        digitalTimeline.observe (port, readTime);
+
+        // Windows and USB round-trip latency determine the actual poll rate.
+        // This target is not a hardware acquisition clock.
+        std::this_thread::sleep_for (std::chrono::milliseconds (2));
+    }
+}
+
+void DataThreadPlugin::stopDigitalPoller() noexcept
+{
+    digitalPollStop.store (true);
+    if (digitalPollThread.joinable())
+        digitalPollThread.join();
 }
