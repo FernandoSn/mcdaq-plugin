@@ -1,52 +1,155 @@
 #include "DataThreadPluginEditor.h"
 
-#include <cmath>
+#include <algorithm>
 
-DataThreadPluginEditor::DataThreadPluginEditor (GenericProcessor* parentNode, DataThreadPlugin* plugin)
+namespace
+{
+// NI-DAQmx-style channel control. The small round lamp shows whether an
+// analog channel is selected. Digital controls stay visually disabled until
+// MCDAQ actually acquires and timestamps digital input transitions.
+class MCDAQChannelButton final : public juce::TextButton
+{
+public:
+    explicit MCDAQChannelButton (const juce::String& label)
+        : juce::TextButton (label)
+    {
+        setButtonText (label);
+        setClickingTogglesState (true);
+    }
+
+    void paintButton (juce::Graphics& g,
+                      bool highlighted,
+                      bool pressed) override
+    {
+        const bool available = isEnabled();
+        const auto bounds = getLocalBounds().toFloat().reduced (0.6f);
+
+        g.setColour (available
+            ? (pressed ? juce::Colour (0xffadadad)
+               : highlighted ? juce::Colour (0xffdedede)
+                             : juce::Colour (0xffc9c9c9))
+            : juce::Colour (0xff8f8f8f));
+        g.fillRoundedRectangle (bounds, 4.0f);
+        g.setColour (available ? juce::Colour (0xff4a4a4a)
+                               : juce::Colour (0xff777777));
+        g.drawRoundedRectangle (bounds, 4.0f, 1.0f);
+
+        g.setFont (juce::Font (11.0f));
+        g.setColour (available ? juce::Colours::black
+                               : juce::Colour (0xff555555));
+        g.drawFittedText (getButtonText(),
+                          7, 1, getWidth() - 27, getHeight() - 2,
+                          juce::Justification::centredLeft, 1);
+
+        constexpr float diameter = 12.0f;
+        const float left = static_cast<float> (getWidth()) - diameter - 7.0f;
+        const float top = (static_cast<float> (getHeight()) - diameter) * 0.5f;
+        g.setColour (available && getToggleState()
+            ? juce::Colour (0xff168b37) : juce::Colour (0xff777777));
+        g.fillEllipse (left, top, diameter, diameter);
+        g.setColour (available ? juce::Colour (0xff545454)
+                               : juce::Colour (0xff858585));
+        g.drawEllipse (left, top, diameter, diameter, 1.0f);
+    }
+};
+
+constexpr int editorWidth = 445;
+constexpr int firstRowY = 30;
+constexpr int channelRowPitch = 23;
+constexpr int channelButtonHeight = 19;
+
+// AI0..AI3, AI4..AI7 | DI0..DI3, DI4..DI7 | device settings.
+constexpr int analogFirstX = 9;
+constexpr int analogSecondX = 68;
+constexpr int digitalFirstX = 130;
+constexpr int digitalSecondX = 182;
+constexpr int analogButtonWidth = 54;
+constexpr int digitalButtonWidth = 46;
+constexpr int settingsX = 241;
+constexpr int settingsWidth = 195;
+// Keep the controls genuinely narrow: the exact-rate readout is separate
+// from the requested-rate ComboBox, rather than covering its arrow.
+constexpr int rateDropDownWidth = 108;
+constexpr int voltageDropDownWidth = 149;
+constexpr int exactRateOffsetX = 116;
+constexpr int exactRateWidth = 77;
+} // namespace
+
+DataThreadPluginEditor::DataThreadPluginEditor (GenericProcessor* parentNode,
+                                                DataThreadPlugin* plugin)
     : GenericEditor (parentNode), thread (plugin)
 {
-    // Two columns of analog buttons, as in the NI-DAQ editor. All eight
-    // inputs are single-ended; there is deliberately no DIFF control.
-    desiredWidth = 405;
+    // Compact NI-style control grouping; all components stay clear of the
+    // orange title bar and the bottom edge of the GenericEditor.
+    desiredWidth = editorWidth;
 
-    for (int ch = 0; ch < 8; ++ch)
+    for (int channel = 0; channel < 8; ++channel)
     {
-        auto button = std::make_unique<juce::TextButton> ("AI" + juce::String (ch));
-        button->setButtonText ("AI" + juce::String (ch));
-        button->setBounds (30 + (ch / 4) * 84, 31 + (ch % 4) * 26, 68, 20);
-        button->setClickingTogglesState (true);
-        button->setColour (juce::TextButton::buttonOnColourId, juce::Colours::forestgreen);
-        button->setColour (juce::TextButton::buttonColourId, juce::Colours::darkgrey);
-        button->setTooltip ("Toggle analog input AI" + juce::String (ch));
-        button->addListener (this);
-        addAndMakeVisible (*button);
-        analogButtons[static_cast<std::size_t> (ch)] = std::move (button);
+        auto analog = std::make_unique<MCDAQChannelButton> (
+            "AI" + juce::String (channel));
+        analog->setBounds (channel < 4 ? analogFirstX : analogSecondX,
+                           firstRowY + (channel % 4) * channelRowPitch,
+                           analogButtonWidth, channelButtonHeight);
+        analog->setTooltip ("Enable/disable analog input AI" +
+                            juce::String (channel));
+        analog->addListener (this);
+        addAndMakeVisible (*analog);
+        analogButtons[static_cast<std::size_t> (channel)] = std::move (analog);
+
+        auto digital = std::make_unique<MCDAQChannelButton> (
+            "DI" + juce::String (channel));
+        digital->setBounds (channel < 4 ? digitalFirstX : digitalSecondX,
+                            firstRowY + (channel % 4) * channelRowPitch,
+                            digitalButtonWidth, channelButtonHeight);
+        digital->setTooltip ("DIO" + juce::String (channel) +
+            " can be used as a digital input. Acquisition and timestamps "
+            "are not yet implemented; this control is a placeholder.");
+        digital->setToggleState (false, juce::dontSendNotification);
+        digital->setEnabled (false);
+        addAndMakeVisible (*digital);
+        digitalButtons[static_cast<std::size_t> (channel)] = std::move (digital);
     }
 
     boardLabel = std::make_unique<juce::Label>();
-    boardLabel->setBounds (211, 15, 190, 16);
-    boardLabel->setFont (juce::Font (11.0f));
+    boardLabel->setBounds (settingsX, 25, settingsWidth, 16);
+    boardLabel->setFont (juce::Font (12.0f, juce::Font::bold));
+    boardLabel->setColour (juce::Label::textColourId, juce::Colours::black);
+    boardLabel->setMinimumHorizontalScale (0.85f);
     addAndMakeVisible (*boardLabel);
 
     sampleRateLabel = std::make_unique<juce::Label>();
-    sampleRateLabel->setText ("Sample rate / channel", juce::dontSendNotification);
-    sampleRateLabel->setBounds (211, 31, 180, 16);
-    sampleRateLabel->setFont (juce::Font (11.0f));
+    sampleRateLabel->setText ("SAMPLE RATE / CHANNEL", juce::dontSendNotification);
+    sampleRateLabel->setBounds (settingsX, 41, settingsWidth, 13);
+    sampleRateLabel->setFont (juce::Font (10.0f));
     addAndMakeVisible (*sampleRateLabel);
 
     sampleRateSelector = std::make_unique<juce::ComboBox> ("MCDAQ sample rate");
-    sampleRateSelector->setBounds (215, 49, 174, 21);
+    sampleRateSelector->setBounds (settingsX + 2, 55, rateDropDownWidth, 22);
     sampleRateSelector->addListener (this);
     addAndMakeVisible (*sampleRateSelector);
 
+    // Keep the requested rate in a genuinely narrower ComboBox and show the
+    // divider-derived clock just to its right, e.g. 30000 Hz (30007.50).
+    // This avoids covering the ComboBox arrow and lets the parentheses remain
+    // easily readable at a smaller font than the selected rate.
+    exactRateLabel = std::make_unique<juce::Label>();
+    exactRateLabel->setBounds (settingsX + exactRateOffsetX, 57, exactRateWidth, 18);
+    exactRateLabel->setFont (juce::Font (12.0f));
+    exactRateLabel->setBorderSize (juce::BorderSize<int> (0));
+    exactRateLabel->setColour (juce::Label::textColourId,
+                               juce::Colour (0xff404040));
+    exactRateLabel->setJustificationType (juce::Justification::centredLeft);
+    exactRateLabel->setInterceptsMouseClicks (false, false);
+    addAndMakeVisible (*exactRateLabel);
+
     voltageRangeLabel = std::make_unique<juce::Label>();
-    voltageRangeLabel->setText ("Analog input voltage range", juce::dontSendNotification);
-    voltageRangeLabel->setBounds (211, 73, 180, 16);
-    voltageRangeLabel->setFont (juce::Font (11.0f));
+    voltageRangeLabel->setText ("AI VOLTAGE RANGE", juce::dontSendNotification);
+    voltageRangeLabel->setBounds (settingsX, 78, settingsWidth, 12);
+    voltageRangeLabel->setFont (juce::Font (10.0f));
     addAndMakeVisible (*voltageRangeLabel);
 
     voltageRangeSelector = std::make_unique<juce::ComboBox> ("MCDAQ voltage range");
-    voltageRangeSelector->setBounds (215, 91, 174, 21);
+    voltageRangeSelector->setBounds (settingsX + 2, 91, voltageDropDownWidth, 21);
     for (const int range : { 10, 5, 2, 1 })
         voltageRangeSelector->addItem (
             "-" + juce::String (range) + " to +" + juce::String (range) + " V", range);
@@ -54,8 +157,8 @@ DataThreadPluginEditor::DataThreadPluginEditor (GenericProcessor* parentNode, Da
     addAndMakeVisible (*voltageRangeSelector);
 
     architectureLabel = std::make_unique<juce::Label>();
-    architectureLabel->setBounds (209, 116, 190, 17);
-    architectureLabel->setFont (juce::Font (10.0f));
+    architectureLabel->setBounds (settingsX, 112, settingsWidth, 12);
+    architectureLabel->setFont (juce::Font (9.0f));
     addAndMakeVisible (*architectureLabel);
 
     refreshControls();
@@ -66,29 +169,42 @@ DataThreadPluginEditor::~DataThreadPluginEditor()
     sampleRateSelector->removeListener (this);
     voltageRangeSelector->removeListener (this);
     for (auto& button : analogButtons)
-        button->removeListener (this);
+        if (button) button->removeListener (this);
 }
 
 void DataThreadPluginEditor::refreshControls()
 {
-    for (int ch = 0; ch < 8; ++ch)
-        analogButtons[static_cast<std::size_t> (ch)]->setToggleState (
-            thread->isChannelEnabled (ch), juce::dontSendNotification);
+    const int analogCount = (std::max) (0, (std::min) (8, thread->getAnalogInputCount()));
+    const int digitalCount = (std::max) (0, (std::min) (8, thread->getDigitalInputCount()));
+    for (int channel = 0; channel < 8; ++channel)
+    {
+        auto& analog = analogButtons[static_cast<std::size_t> (channel)];
+        analog->setVisible (channel < analogCount);
+        analog->setToggleState (channel < analogCount && thread->isChannelEnabled (channel),
+                                juce::dontSendNotification);
+
+        // Digital is strictly presentation-only until acquisition exists.
+        auto& digital = digitalButtons[static_cast<std::size_t> (channel)];
+        digital->setVisible (channel < digitalCount);
+        digital->setToggleState (false, juce::dontSendNotification);
+        digital->setEnabled (false);
+    }
 
     sampleRateSelector->clear (juce::dontSendNotification);
     for (const long rate : thread->getAvailableRates())
-    {
-        juce::String title = juce::String (rate) + " Hz";
-        if (rate == thread->getSampleRateHz() &&
-            thread->getDeclaredSampleRateHz() > 0.0 &&
-            std::abs (static_cast<double> (rate) -
-                      thread->getDeclaredSampleRateHz()) > 0.001)
-            title += " (pacer " +
-                juce::String (thread->getDeclaredSampleRateHz(), 3) + ")";
-        sampleRateSelector->addItem (title, static_cast<int> (rate));
-    }
+        sampleRateSelector->addItem (juce::String (rate) + " Hz", static_cast<int> (rate));
     sampleRateSelector->setSelectedId (
         static_cast<int> (thread->getSampleRateHz()), juce::dontSendNotification);
+
+    const double preciseRate = thread->getDeclaredSampleRateHz();
+    const bool haveClock = preciseRate > 0.0;
+    exactRateLabel->setText (haveClock ? "(" + juce::String (preciseRate, 2) + ")"
+                                       : juce::String(),
+                             juce::dontSendNotification);
+    exactRateLabel->setTooltip (haveClock
+        ? "Exact nominal clock from the hardware divider: " +
+          juce::String (preciseRate, 6) + " Hz per channel"
+        : "Hardware sampling-rate preflight has not completed");
 
     voltageRangeSelector->setSelectedId (
         thread->getVoltageRangeVolts(), juce::dontSendNotification);
@@ -97,12 +213,12 @@ void DataThreadPluginEditor::refreshControls()
         ? "Select the common range for all enabled USB-1608FS-Plus analog inputs"
         : "USB-204 analog input range is fixed at -10 to +10 V");
 
-    boardLabel->setText (juce::String (thread->getBoardName().c_str()),
-                         juce::dontSendNotification);
+    const juce::String product (thread->getBoardName().c_str());
+    boardLabel->setText (product, juce::dontSendNotification);
     architectureLabel->setText (
-        juce::String (thread->isSimultaneousSampling()
-            ? "Simultaneous ADCs" : "Multiplexed (sequential)") +
-        " | " + juce::String (thread->getChannelCount()) + " AI",
+        juce::String (thread->isSimultaneousSampling() ? "Simultaneous" : "Multiplexed") +
+        " | " + juce::String (analogCount) + " AI | " +
+        juce::String (digitalCount) + " DI (pending)",
         juce::dontSendNotification);
 }
 
@@ -120,20 +236,20 @@ void DataThreadPluginEditor::comboBoxChanged (juce::ComboBox* box)
     if (accepted)
     {
         CoreServices::updateSignalChain (this);
-        refreshControls(); // Reflect newly negotiated actual clock.
+        refreshControls(); // Display the negotiated precise clock.
     }
 }
 
 void DataThreadPluginEditor::buttonClicked (juce::Button* button)
 {
-    for (int ch = 0; ch < 8; ++ch)
+    for (int channel = 0; channel < 8; ++channel)
     {
-        if (button != analogButtons[static_cast<std::size_t> (ch)].get())
+        if (button != analogButtons[static_cast<std::size_t> (channel)].get())
             continue;
         const auto nextMask = static_cast<std::uint8_t> (
-            thread->getChannelMask() ^ static_cast<std::uint8_t> (1u << ch));
+            thread->getChannelMask() ^ static_cast<std::uint8_t> (1u << channel));
         const bool accepted = thread->setChannelMask (nextMask);
-        refreshControls(); // Reject attempts to disable the last channel.
+        refreshControls(); // Cannot disable the final AI channel.
         if (accepted)
         {
             CoreServices::updateSignalChain (this);

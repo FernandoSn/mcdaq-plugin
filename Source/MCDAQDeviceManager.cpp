@@ -295,9 +295,9 @@ MCDAQDeviceManager::getSelectedScanCapabilities() const
 {
     const std::string product = getSelectedProductName();
     if (product == "USB-204")
-        return { true, false, 8, 500000, 500000 };
+        return { true, false, 8, 8, 500000, 500000 };
     if (product == "USB-1608FS-Plus")
-        return { true, true, 8, 100000, 400000 };
+        return { true, true, 8, 8, 100000, 400000 };
     return {};
 }
 

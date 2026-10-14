@@ -26,6 +26,7 @@ public:
         bool supported = false;
         bool simultaneous = false;
         int analogChannels = 0;
+        int digitalChannels = 0; // Individually configurable DIO pins, not yet recorded.
         long maxPerChannelHz = 0;
         long maxAggregateHz = 0;
     };

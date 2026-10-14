@@ -204,6 +204,16 @@ bool DataThreadPlugin::setChannelMask (std::uint8_t mask)
     return true;
 }
 
+int DataThreadPlugin::getAnalogInputCount() const
+{
+    return deviceManager ? deviceManager->getSelectedScanCapabilities().analogChannels : 0;
+}
+
+int DataThreadPlugin::getDigitalInputCount() const
+{
+    return deviceManager ? deviceManager->getSelectedScanCapabilities().digitalChannels : 0;
+}
+
 std::string DataThreadPlugin::getBoardName() const
 {
     return deviceManager ? deviceManager->getSelectedProductName() : std::string();

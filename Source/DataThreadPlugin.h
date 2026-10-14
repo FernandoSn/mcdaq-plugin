@@ -60,6 +60,9 @@ public:
     double getDeclaredSampleRateHz() const;
     bool setSampleRateHz (long rateHz);
     int getChannelCount() const noexcept { return selectedChannelCount; }
+    // Capabilities of the currently selected board (not enabled-channel counts).
+    int getAnalogInputCount() const;
+    int getDigitalInputCount() const;
     std::uint8_t getChannelMask() const noexcept { return selectedChannelMask; }
     bool isChannelEnabled (int channel) const noexcept;
     std::vector<int> getSelectedChannels() const;
