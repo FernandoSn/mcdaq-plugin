@@ -207,6 +207,18 @@ bool DataThreadPlugin::setDIObservationPhase (DIObservationPhase phase)
     return true;
 }
 
+bool DataThreadPlugin::setDigitalHoldbackMs (int delayMs)
+{
+    // Configure only while stopped. This affects OE delivery latency only;
+    // it is NOT a new driver call or an ADC clock adjustment.
+    if (CoreServices::getAcquisitionStatus() || acquisition ||
+        isThreadRunning() ||
+        (delayMs != 0 && delayMs != MCDAQDigitalHoldback::experimentalDelayMs))
+        return false;
+    selectedDigitalHoldbackMs = delayMs;
+    return true;
+}
+
 std::vector<int> DataThreadPlugin::getSelectedChannels() const
 {
     std::vector<int> result;
@@ -646,6 +658,23 @@ bool DataThreadPlugin::startAcquisition()
     digitalPollCount.store (0);
     digitalReadDurationUs.store (0);
     digitalMaxPollGapUs.store (0);
+    // HOLD OFF preserves direct v3 forwarding. The optional queue holds
+    // copies of complete native ADC blocks only AFTER hardware acquisition.
+    // No new MCC calls and no change to ADC timestamps/clock calibration.
+    digitalHoldback.reset (selectedChannelCount, activeSampleRateHz,
+                           selectedDigitalMask != 0 ? selectedDigitalHoldbackMs : 0);
+    if (digitalHoldback.diagnostics().failed)
+    {
+        LOGE ("MCDAQ: Invalid digital holdback configuration.");
+        acquisition->stop();
+        acquisition.reset();
+        return false;
+    }
+    LOGC ("MCDAQ: DI HOLD ",
+          digitalHoldback.enabled() ? "1ms (EXPERIMENTAL)" : "OFF",
+          " | observation phase=",
+          selectedDIObservationPhase == DIObservationPhase::Midpoint ? "MID" : "END",
+          " | ADC hardware/ring buffer/clock estimator unchanged.");
     if (selectedDigitalMask != 0)
     {
         digitalPollStop.store (false);
@@ -843,6 +872,28 @@ bool DataThreadPlugin::stopAcquisition()
     {
         acquisition->stop();
 
+        // The MCC final drain can append blocks to the output staging queue.
+        // Stop both workers first, then commit every remaining block before
+        // reconciling the count accepted by the acquisition consumer with
+        // the number actually written to Open Ephys's DataBuffer.
+        bool holdbackFlushSucceeded = true;
+        if (digitalHoldback.enabled())
+        {
+            holdbackFlushSucceeded = digitalHoldback.flush (
+                [this] (const std::uint16_t* raw, std::size_t points,
+                        std::uint64_t first)
+                { return commitRawBlock (raw, points, first); });
+            const auto h = digitalHoldback.diagnostics();
+            LOGC ("MCDAQ: DI holdback accounting: staged ADC points=", h.stagedPoints,
+                  " | committed to OE DataBuffer=", h.committedPoints,
+                  " | pending=", h.pendingPoints,
+                  " | max pending=", h.maximumPendingPoints,
+                  " | staged/committed blocks=", h.stagedBlocks, "/", h.committedBlocks,
+                  " | flush success=", holdbackFlushSucceeded,
+                  " | failures=", h.failures,
+                  " | nominal delay frames=", h.delayFrames);
+        }
+
         // Retrieve statistics AFTER the final drain.
         const auto stopped =
             acquisition->getStopDiagnostics();
@@ -866,6 +917,10 @@ bool DataThreadPlugin::stopAcquisition()
               stopped.finalConsumed,
               " | Final Delivered: ",
               stats.totalSamplesDelivered);
+        if (digitalHoldback.enabled())
+            LOGC ("MCDAQ: HOLD: Final Delivered counts acquisition blocks accepted "
+                  "for staging, not necessarily DataBuffer commits until the "
+                  "separate post-flush reconciliation succeeds.");
 
         LOGC ("MCDAQ: Final drain attempted: ",
               stopped.drainAttempted,
@@ -918,7 +973,14 @@ bool DataThreadPlugin::stopAcquisition()
              digitalSummary.queueOverflows == 0 &&
              digitalSummary.unrepresentableTransitions == 0 &&
              digitalMaxPollGapUs.load() <= 50000);
+        const auto holdback = digitalHoldback.diagnostics();
+        const bool holdbackIntegrityVerified = ! digitalHoldback.enabled() ||
+            (holdbackFlushSucceeded && ! holdback.failed &&
+             holdback.pendingPoints == 0 &&
+             holdback.stagedPoints == holdback.committedPoints &&
+             holdback.committedPoints == stats.totalSamplesDelivered);
         const bool completeFramesVerified =
+            holdbackIntegrityVerified &&
             digitalIntegrityVerified &&
             stopped.statusError == 0 && stopped.status == 0 &&
             stopped.drainSucceeded &&
@@ -1008,6 +1070,25 @@ std::size_t DataThreadPlugin::receiveRawBlock (
 }
 
 std::size_t DataThreadPlugin::forwardRawBlock (
+    const uint16_t* samples,
+    std::size_t count,
+    uint64_t firstSample)
+{
+    if (! digitalHoldback.enabled())
+        return commitRawBlock (samples, count, firstSample);
+
+    // Hold copies of acquired native ADC blocks; defer the existing exact
+    // conversion+TTL filling until the block can be sent to Open Ephys.
+    // The consumer receives a full acknowledgement only on successful staging.
+    const bool accepted = digitalHoldback.push (
+        samples, count, firstSample,
+        [this] (const std::uint16_t* raw, std::size_t points,
+                std::uint64_t first)
+        { return commitRawBlock (raw, points, first); });
+    return accepted ? count : 0;
+}
+
+std::size_t DataThreadPlugin::commitRawBlock (
     const uint16_t* samples,
     std::size_t count,
     uint64_t firstSample)

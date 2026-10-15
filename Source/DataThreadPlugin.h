@@ -31,6 +31,7 @@
 #include <chrono>
 #include "MCDAQDigitalTimeline.h"
 #include "MCDAQDigitalClockEstimator.h"
+#include "MCDAQDigitalHoldback.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -75,6 +76,9 @@ public:
     using DIObservationPhase = MCDAQDigitalTimeline::ObservationPhase;
     DIObservationPhase getDIObservationPhase() const noexcept { return selectedDIObservationPhase; }
     bool setDIObservationPhase (DIObservationPhase phase);
+    // Output-only staging. OFF (default) or 1ms; never changes ADC sampling.
+    int getDigitalHoldbackMs() const noexcept { return selectedDigitalHoldbackMs; }
+    bool setDigitalHoldbackMs (int delayMs);
     bool isChannelEnabled (int channel) const noexcept;
     std::vector<int> getSelectedChannels() const;
     bool setChannelMask (std::uint8_t mask);
@@ -136,6 +140,7 @@ private:
     std::uint8_t selectedChannelMask = 0x01; // AI0 initially enabled.
     std::uint8_t selectedDigitalMask = 0x00; // All DI inputs opt-in.
     DIObservationPhase selectedDIObservationPhase = DIObservationPhase::Midpoint; // v3 default.
+    int selectedDigitalHoldbackMs = 0; // OFF: direct v3 forwarding.
     int selectedRangeVolts = 10;
     double activeSampleRateHz = 1000.0;
 
@@ -167,6 +172,8 @@ private:
     // Digital-only relative-clock estimator (fed by existing MCC callbacks).
     // Does not affect the analog rate used for sample timestamps/metadata.
     MCDAQDigitalClockEstimator digitalClockEstimator;
+    // Bounded output-only native ADC queue; owned/used by consumer worker.
+    MCDAQDigitalHoldback digitalHoldback;
     std::thread digitalPollThread;
     std::atomic<bool> digitalPollStop { true };
     std::atomic<int> digitalPollError { 0 };
@@ -188,6 +195,10 @@ private:
         void* userData);
 
     std::size_t forwardRawBlock (
+        const uint16_t* samples,
+        std::size_t count,
+        uint64_t firstSample);
+    std::size_t commitRawBlock (
         const uint16_t* samples,
         std::size_t count,
         uint64_t firstSample);
