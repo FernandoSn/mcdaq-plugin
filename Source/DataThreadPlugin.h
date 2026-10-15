@@ -72,6 +72,9 @@ public:
     std::uint8_t getDigitalMask() const noexcept { return selectedDigitalMask; }
     bool isDigitalEnabled (int channel) const noexcept;
     bool setDigitalMask (std::uint8_t mask);
+    using DIObservationPhase = MCDAQDigitalTimeline::ObservationPhase;
+    DIObservationPhase getDIObservationPhase() const noexcept { return selectedDIObservationPhase; }
+    bool setDIObservationPhase (DIObservationPhase phase);
     bool isChannelEnabled (int channel) const noexcept;
     std::vector<int> getSelectedChannels() const;
     bool setChannelMask (std::uint8_t mask);
@@ -132,6 +135,7 @@ private:
     int selectedChannelCount = 1;
     std::uint8_t selectedChannelMask = 0x01; // AI0 initially enabled.
     std::uint8_t selectedDigitalMask = 0x00; // All DI inputs opt-in.
+    DIObservationPhase selectedDIObservationPhase = DIObservationPhase::Midpoint; // v3 default.
     int selectedRangeVolts = 10;
     double activeSampleRateHz = 1000.0;
 
@@ -167,6 +171,8 @@ private:
     std::atomic<bool> digitalPollStop { true };
     std::atomic<int> digitalPollError { 0 };
     std::atomic<std::uint64_t> digitalPollCount { 0 };
+    // Diagnostic-only: total measured duration of existing cbDIn calls.
+    std::atomic<std::uint64_t> digitalReadDurationUs { 0 };
     std::atomic<std::uint64_t> digitalMaxPollGapUs { 0 };
     void runDigitalPoller() noexcept;
     void stopDigitalPoller() noexcept;

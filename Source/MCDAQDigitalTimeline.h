@@ -20,6 +20,11 @@ public:
     using Clock = std::chrono::steady_clock;
     using TimePoint = Clock::time_point;
 
+    // Experimental hypothesis about when the USB AUXPORT value was sampled.
+    // MIDPOINT retains the original v3 estimate; READ_END uses the host time
+    // immediately after cbDIn returns. Neither is a hardware timestamp.
+    enum class ObservationPhase : std::uint8_t { Midpoint = 0, ReadEnd = 1 };
+
     struct Diagnostics
     {
         std::uint64_t observations = 0;
@@ -38,9 +43,11 @@ public:
     void reset (std::uint8_t selectedMask,
                 std::uint8_t initialPortValue,
                 double rateHz,
-                TimePoint approximateAnalogStart)
+                TimePoint approximateAnalogStart,
+                ObservationPhase observationPhase = ObservationPhase::Midpoint)
     {
         std::lock_guard<std::mutex> lock (mutex_);
+        observationPhase_ = observationPhase;
         enabledMask_ = selectedMask;
         observedState_ = initialPortValue & enabledMask_;
         emittedState_ = observedState_;
@@ -56,18 +63,20 @@ public:
     }
 
     // A digital transition occurred between two observed port states.
-    // Assign the midpoint between their observed times (read-call midpoints),
-    // rather than the *completion* of the detecting USB call. The actual
-    // electrical edge remains unlatched and cannot be reconstructed exactly.
+    // Map each read to the selected host-side observation time, then assign
+    // the midpoint between two observations. The v3 default is the midpoint
+    // of each cbDIn call. Experimental READ_END uses its completion instead.
+    // Neither mode can recover the actual unlatched electrical edge.
     void observe (std::uint8_t rawPortValue, TimePoint readBegin, TimePoint readEnd)
     {
         std::lock_guard<std::mutex> lock (mutex_);
         ++diagnostics_.observations;
         if (readEnd < readBegin)
             return;
-        const TimePoint readMidpoint = readBegin + (readEnd - readBegin) / 2;
+        const TimePoint observationTime = observationPhase_ == ObservationPhase::ReadEnd
+            ? readEnd : readBegin + (readEnd - readBegin) / 2;
         const TimePoint previousTime = previousPollTime_;
-        previousPollTime_ = readMidpoint;
+        previousPollTime_ = observationTime;
         const std::uint8_t next = rawPortValue & enabledMask_;
         if (next == observedState_)
             return;
@@ -79,9 +88,9 @@ public:
             ++diagnostics_.queueOverflows;
             return; // The caller must stop the stream rather than lose edges silently.
         }
-        const TimePoint estimatedTransition = previousTime + (readMidpoint - previousTime) / 2;
+        const TimePoint estimatedTransition = previousTime + (observationTime - previousTime) / 2;
         const auto windowUs = std::chrono::duration_cast<std::chrono::microseconds> (
-            readMidpoint - previousTime).count();
+            observationTime - previousTime).count();
         if (windowUs > 0)
         {
             const auto gapUs = static_cast<std::uint64_t> (windowUs);
@@ -166,6 +175,7 @@ private:
     static constexpr std::size_t maxQueuedTransitions = 8192;
     mutable std::mutex mutex_;
     std::deque<Change> queue_;
+    ObservationPhase observationPhase_ = ObservationPhase::Midpoint;
     std::uint8_t enabledMask_ = 0;
     std::uint8_t observedState_ = 0;
     std::uint8_t emittedState_ = 0;

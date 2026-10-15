@@ -196,6 +196,17 @@ bool DataThreadPlugin::setDigitalMask (std::uint8_t mask)
     return true;
 }
 
+bool DataThreadPlugin::setDIObservationPhase (DIObservationPhase phase)
+{
+    // Never switch the interpretation of in-flight digital observations.
+    if (CoreServices::getAcquisitionStatus() || acquisition || isThreadRunning())
+        return false;
+    if (phase != DIObservationPhase::Midpoint && phase != DIObservationPhase::ReadEnd)
+        return false;
+    selectedDIObservationPhase = phase;
+    return true;
+}
+
 std::vector<int> DataThreadPlugin::getSelectedChannels() const
 {
     std::vector<int> result;
@@ -627,11 +638,13 @@ bool DataThreadPlugin::startAcquisition()
     // the analog acquisition/event path must remain untouched. This is an
     // approximate software reference, NOT an ADC-latched frame-zero time.
     digitalTimeline.reset (selectedDigitalMask, initialDigitalPort,
-                           activeSampleRateHz, analogStartEnd);
+                           activeSampleRateHz, analogStartEnd,
+                           selectedDIObservationPhase);
     digitalClockEstimator.reset (activeSampleRateHz, selectedChannelCount,
                                  analogStartEnd);
     digitalPollError.store (0);
     digitalPollCount.store (0);
+    digitalReadDurationUs.store (0);
     digitalMaxPollGapUs.store (0);
     if (selectedDigitalMask != 0)
     {
@@ -655,7 +668,10 @@ bool DataThreadPlugin::startAcquisition()
               "). Target poll interval 2 ms, SYSTEM-PACED, NOT synchronous ",
               "with analog. Short pulses may be missed; event times are approximate. ",
               "DI host/ADC anchor=scan-start return; start-call duration=",
-              String (ulStartCallMs, 3), " ms; no extra startup UL status calls.");
+              String (ulStartCallMs, 3), " ms; DI observation phase=",
+              selectedDIObservationPhase == DIObservationPhase::Midpoint
+                  ? "MID (original v3)" : "END (experimental)",
+              "; no extra startup UL status calls.");
     }
 
     startThread();
@@ -799,6 +815,15 @@ bool DataThreadPlugin::stopAcquisition()
               " | Fallbacks=", clock.fallbackCount,
               ". Analog timestamps and metadata UNCHANGED.");
         const auto d = digitalTimeline.getDiagnostics();
+        const auto readCount = digitalPollCount.load();
+        const double meanReadMs = readCount == 0 ? 0.0
+            : static_cast<double> (digitalReadDurationUs.load()) /
+                  static_cast<double> (readCount) / 1000.0;
+        LOGC ("MCDAQ: DI timing hypothesis: phase=",
+              selectedDIObservationPhase == DIObservationPhase::Midpoint ? "MID" : "END",
+              " | mean cbDIn duration (ms)=", String (meanReadMs, 3),
+              " | read count=", readCount,
+              " | time anchor=scan-start return | ADC untouched | clock-fit unchanged.");
         LOGC ("MCDAQ: DI polling: reads=", digitalPollCount.load(),
               " | Max inter-read gap (us)=", digitalMaxPollGapUs.load(),
               " | Transitions observed=", d.transitionsObserved,
@@ -1092,6 +1117,11 @@ void DataThreadPlugin::runDigitalPoller() noexcept
         }
         firstRead = false;
         previousReadTime = readTime;
+        const auto readUs = std::chrono::duration_cast<std::chrono::microseconds> (
+            readTime - readBegin).count();
+        if (readUs > 0)
+            digitalReadDurationUs.fetch_add (static_cast<std::uint64_t> (readUs),
+                                             std::memory_order_relaxed);
         ++digitalPollCount;
         digitalTimeline.observe (port, readBegin, readTime);
 
