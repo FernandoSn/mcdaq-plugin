@@ -25,9 +25,6 @@ private:
     std::array<std::unique_ptr<juce::TextButton>, 8> analogButtons;
     std::array<std::unique_ptr<juce::TextButton>, 8> digitalButtons;
     std::unique_ptr<juce::ComboBox> sampleRateSelector;
-    std::unique_ptr<juce::TextButton> diTimeButton;
-    std::unique_ptr<juce::Label> diTimeLabel;
-    std::unique_ptr<juce::TextButton> digitalHoldbackButton;
     std::unique_ptr<juce::Label> exactRateLabel;
     std::unique_ptr<juce::ComboBox> voltageRangeSelector;
     std::unique_ptr<juce::Label> sampleRateLabel;

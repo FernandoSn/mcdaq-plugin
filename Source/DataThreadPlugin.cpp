@@ -35,15 +35,6 @@
 #include <thread>
 #include <system_error>
 
-// Set to 1 when detailed acquisition diagnostics are needed.
-#define MCDAQ_VERBOSE_ACQUISITION_LOGS 0
-
-struct PluginSettingsObject
-{
-    // Store settings for the plugin here
-};
-
-
 DataThreadPlugin::DataThreadPlugin (SourceNode* sn)
     : DataThread (sn),
       deviceManager (std::make_unique<MCDAQDeviceManager>())
@@ -84,32 +75,6 @@ DataThreadPlugin::DataThreadPlugin (SourceNode* sn)
               deviceManager->getSelectedBoardNumber(),
               " | Unique ID: ",
               id.c_str());
-
-        // Diagnostic clock-output experiment. Keep this separate from the
-        // normal acquisition path; it only configures the 1608 SYNC pin.
-        // Change this to false after the timing experiment if SYNC output
-        // is not needed for routine recordings.
-        constexpr bool enable1608SyncForClockTest = true;
-        if (enable1608SyncForClockTest && name == "USB-1608FS-Plus")
-        {
-            const auto sync = deviceManager->enableSelectedSyncOutput();
-
-            if (sync.enabled)
-            {
-                LOGC ("MCDAQ: USB-1608FS-Plus SYNC output ENABLED and "
-                      "verified (BIINPUTPACEROUT=", sync.readback,
-                      ", board ", deviceManager->getSelectedBoardNumber(),
-                      "). Internal pacer should appear on SYNC while scanning.");
-            }
-            else
-            {
-                LOGE ("MCDAQ: USB-1608FS-Plus SYNC output NOT verified. "
-                      "cbSetConfig error=", sync.setError,
-                      ", cbGetConfig error=", sync.getError,
-                      ", readback=", sync.readback,
-                      ". Analog acquisition remains available.");
-            }
-        }
 
         float voltage = 0.0f;
 
@@ -193,29 +158,6 @@ bool DataThreadPlugin::setDigitalMask (std::uint8_t mask)
         return false;
 
     selectedDigitalMask = mask; // zero disables digital polling entirely.
-    return true;
-}
-
-bool DataThreadPlugin::setDIObservationPhase (DIObservationPhase phase)
-{
-    // Never switch the interpretation of in-flight digital observations.
-    if (CoreServices::getAcquisitionStatus() || acquisition || isThreadRunning())
-        return false;
-    if (phase != DIObservationPhase::Midpoint && phase != DIObservationPhase::ReadEnd)
-        return false;
-    selectedDIObservationPhase = phase;
-    return true;
-}
-
-bool DataThreadPlugin::setDigitalHoldbackMs (int delayMs)
-{
-    // Configure only while stopped. This affects OE delivery latency only;
-    // it is NOT a new driver call or an ADC clock adjustment.
-    if (CoreServices::getAcquisitionStatus() || acquisition ||
-        isThreadRunning() ||
-        (delayMs != 0 && delayMs != MCDAQDigitalHoldback::experimentalDelayMs))
-        return false;
-    selectedDigitalHoldbackMs = delayMs;
     return true;
 }
 
@@ -517,8 +459,6 @@ void DataThreadPlugin::updateSettings (
 
 bool DataThreadPlugin::startAcquisition()
 {
-    LOGC ("MCDAQ DEBUG 1: Entered startAcquisition()");
-
     if (! foundInputSource() || getDeclaredSampleRateHz() <= 0.0)
     {
         LOGE ("MCDAQ: No supported board or validated stream rate. "
@@ -528,8 +468,6 @@ bool DataThreadPlugin::startAcquisition()
 
     const int boardNum =
         deviceManager->getSelectedBoardNumber();
-
-    LOGC ("MCDAQ DEBUG 2: Creating acquisition object");
 
     acquisition =
         std::make_unique<MCDAQAcquisition> (boardNum);
@@ -558,15 +496,11 @@ bool DataThreadPlugin::startAcquisition()
         }
     }
 
-    LOGC ("MCDAQ DEBUG 3: Calling MCC scan start");
-
     // Approximate host-clock anchor only. MCC does not provide a digital
     // latch timestamp, so DI->AI timing MUST NOT be treated as sample-accurate.
     const auto analogStartBegin = MCDAQDigitalTimeline::Clock::now();
     const int error = acquisition->start (selectedSampleRateHz, getSelectedChannels(), selectedRangeVolts);
     const auto analogStartEnd = MCDAQDigitalTimeline::Clock::now();
-
-    LOGC ("MCDAQ DEBUG 4: MCC returned ", error);
 
     if (error != 0)
     {
@@ -594,8 +528,6 @@ bool DataThreadPlugin::startAcquisition()
             return false;
         }
     }
-
-    diagnosticTicks = 0;
 
     const auto stats = acquisition->getStatistics();
 
@@ -640,8 +572,6 @@ bool DataThreadPlugin::startAcquisition()
           " points | MCC event: ", stats.notificationPoints,
           " points");
 
-    LOGC ("MCDAQ DEBUG 5: Starting DataThread");
-
     if (sourceBuffers.size() > 0)
         sourceBuffers[0]->clear();
 
@@ -650,19 +580,18 @@ bool DataThreadPlugin::startAcquisition()
     // the analog acquisition/event path must remain untouched. This is an
     // approximate software reference, NOT an ADC-latched frame-zero time.
     digitalTimeline.reset (selectedDigitalMask, initialDigitalPort,
-                           activeSampleRateHz, analogStartEnd,
-                           selectedDIObservationPhase);
+                           activeSampleRateHz, analogStartEnd);
     digitalClockEstimator.reset (activeSampleRateHz, selectedChannelCount,
                                  analogStartEnd);
     digitalPollError.store (0);
     digitalPollCount.store (0);
     digitalReadDurationUs.store (0);
     digitalMaxPollGapUs.store (0);
-    // HOLD OFF preserves direct v3 forwarding. The optional queue holds
-    // copies of complete native ADC blocks only AFTER hardware acquisition.
-    // No new MCC calls and no change to ADC timestamps/clock calibration.
+    // Fixed 1 ms holdback whenever DI is selected; no DI => direct forwarding.
+    // Whole ADC blocks are staged only AFTER hardware acquisition. Analog
+    // acquisition, timestamps, and the online clock estimator are untouched.
     digitalHoldback.reset (selectedChannelCount, activeSampleRateHz,
-                           selectedDigitalMask != 0 ? selectedDigitalHoldbackMs : 0);
+                           selectedDigitalMask != 0 ? MCDAQDigitalHoldback::digitalDelayMs : 0);
     if (digitalHoldback.diagnostics().failed)
     {
         LOGE ("MCDAQ: Invalid digital holdback configuration.");
@@ -670,11 +599,9 @@ bool DataThreadPlugin::startAcquisition()
         acquisition.reset();
         return false;
     }
-    LOGC ("MCDAQ: DI HOLD ",
-          digitalHoldback.enabled() ? "1ms (EXPERIMENTAL)" : "OFF",
-          " | observation phase=",
-          selectedDIObservationPhase == DIObservationPhase::Midpoint ? "MID" : "END",
-          " | ADC hardware/ring buffer/clock estimator unchanged.");
+    if (selectedDigitalMask != 0)
+        LOGC ("MCDAQ: Digital inputs: END observation, 1 ms native-block holdback; "
+              "software-polled, not ADC-synchronous.");
     if (selectedDigitalMask != 0)
     {
         digitalPollStop.store (false);
@@ -697,15 +624,11 @@ bool DataThreadPlugin::startAcquisition()
               "). Target poll interval 2 ms, SYSTEM-PACED, NOT synchronous ",
               "with analog. Short pulses may be missed; event times are approximate. ",
               "DI host/ADC anchor=scan-start return; start-call duration=",
-              String (ulStartCallMs, 3), " ms; DI observation phase=",
-              selectedDIObservationPhase == DIObservationPhase::Midpoint
-                  ? "MID (original v3)" : "END (experimental)",
-              "; no extra startup UL status calls.");
+              String (ulStartCallMs, 3), " ms; timestamp=cbDIn completion "
+              "(END), edge interpolated between reads.");
     }
 
     startThread();
-
-    LOGC ("MCDAQ DEBUG 6: DataThread started");
 
     return true;
 }
@@ -768,44 +691,6 @@ bool DataThreadPlugin::updateBuffer()
         return false;
     }
 
-    #if MCDAQ_VERBOSE_ACQUISITION_LOGS
-    // Approximately once per second.
-    if (++diagnosticTicks >= 50)
-    {
-        diagnosticTicks = 0;
-
-        const auto stats =
-            acquisition->getStatistics();
-
-        const auto driver =
-            acquisition->getDriverStatus();
-
-        LOGC ("MCDAQ: Produced: ",
-              stats.totalSamplesProduced,
-              " | Consumed: ",
-              stats.totalSamplesConsumed,
-              " | Delivered: ",
-              stats.totalSamplesDelivered,
-              " | Callback count: ",
-              stats.lastSampleCount);
-
-        if (driver.error == 0)
-        {
-            LOGC ("MCDAQ: UL status: ",
-                  driver.status,
-                  " | CurCount: ",
-                  driver.currentCount,
-                  " | CurIndex: ",
-                  driver.currentIndex);
-        }
-        else
-        {
-            LOGE ("MCDAQ: cbGetStatus failed: ",
-                  driver.error);
-        }
-    }
-    #endif
-
     return true;
 }
 
@@ -848,11 +733,9 @@ bool DataThreadPlugin::stopAcquisition()
         const double meanReadMs = readCount == 0 ? 0.0
             : static_cast<double> (digitalReadDurationUs.load()) /
                   static_cast<double> (readCount) / 1000.0;
-        LOGC ("MCDAQ: DI timing hypothesis: phase=",
-              selectedDIObservationPhase == DIObservationPhase::Midpoint ? "MID" : "END",
-              " | mean cbDIn duration (ms)=", String (meanReadMs, 3),
-              " | read count=", readCount,
-              " | time anchor=scan-start return | ADC untouched | clock-fit unchanged.");
+        LOGC ("MCDAQ: DI timing: END observation | mean cbDIn duration (ms)=",
+              String (meanReadMs, 3), " | reads=", readCount,
+              " | time anchor=scan-start return.");
         LOGC ("MCDAQ: DI polling: reads=", digitalPollCount.load(),
               " | Max inter-read gap (us)=", digitalMaxPollGapUs.load(),
               " | Transitions observed=", d.transitionsObserved,
@@ -917,11 +800,6 @@ bool DataThreadPlugin::stopAcquisition()
               stopped.finalConsumed,
               " | Final Delivered: ",
               stats.totalSamplesDelivered);
-        if (digitalHoldback.enabled())
-            LOGC ("MCDAQ: HOLD: Final Delivered counts acquisition blocks accepted "
-                  "for staging, not necessarily DataBuffer commits until the "
-                  "separate post-flush reconciliation succeeds.");
-
         LOGC ("MCDAQ: Final drain attempted: ",
               stopped.drainAttempted,
               " | Successful: ",
@@ -1074,6 +952,7 @@ std::size_t DataThreadPlugin::forwardRawBlock (
     std::size_t count,
     uint64_t firstSample)
 {
+    // With DI disabled, skip the staging queue entirely.
     if (! digitalHoldback.enabled())
         return commitRawBlock (samples, count, firstSample);
 

@@ -70,8 +70,6 @@ constexpr int settingsWidth = 195;
 // from the requested-rate ComboBox, rather than covering its arrow.
 constexpr int rateDropDownWidth = 108;
 constexpr int voltageDropDownWidth = 149;
-constexpr int diTimeOffsetX = 155;
-constexpr int diTimeControlWidth = 40;
 constexpr int exactRateOffsetX = 116;
 constexpr int exactRateWidth = 77;
 } // namespace
@@ -157,36 +155,6 @@ DataThreadPluginEditor::DataThreadPluginEditor (GenericProcessor* parentNode,
     voltageRangeSelector->addListener (this);
     addAndMakeVisible (*voltageRangeSelector);
 
-    // The existing compact settings row has 43 free pixels at its right edge.
-    // A digital-only experiment: never changes the analog stream or USB calls.
-    diTimeLabel = std::make_unique<juce::Label>();
-    diTimeLabel->setText ("DI TIME", juce::dontSendNotification);
-    diTimeLabel->setBounds (settingsX + diTimeOffsetX, 78, diTimeControlWidth, 12);
-    diTimeLabel->setFont (juce::Font (8.0f));
-    addAndMakeVisible (*diTimeLabel);
-
-    diTimeButton = std::make_unique<juce::TextButton> ("MID");
-    diTimeButton->setBounds (settingsX + diTimeOffsetX, 91, diTimeControlWidth, 21);
-    diTimeButton->setTooltip (
-        "MID: original v3 cbDIn call midpoint. END: experimental cbDIn "
-        "completion time. Both use the midpoint BETWEEN digital observations. "
-        "Select only while stopped; not a hardcoded millisecond correction.");
-    diTimeButton->addListener (this);
-    addAndMakeVisible (*diTimeButton);
-
-    // Independent HOLD control on the architecture row; no overlap with
-    // 40px DI TIME selector above, nor the channel buttons to the left.
-    digitalHoldbackButton = std::make_unique<juce::TextButton> ("HOLD OFF");
-    digitalHoldbackButton->setBounds (351, 112, 85, 13);
-    digitalHoldbackButton->setTooltip (
-        "EXPERIMENTAL: HOLD OFF sends ADC blocks directly to Open Ephys. "
-        "HOLD 1ms queues native ADC blocks before delivery to give digital "
-        "polls time to arrive, potentially eliminating late TTL placement. "
-        "ADC sampling and timestamp mapping remain unchanged. Adds stream "
-        "latency; select only while acquisition is stopped.");
-    digitalHoldbackButton->addListener (this);
-    addAndMakeVisible (*digitalHoldbackButton);
-
     architectureLabel = std::make_unique<juce::Label>();
     architectureLabel->setBounds (settingsX, 112, 106, 12);
     architectureLabel->setFont (juce::Font (9.0f));
@@ -201,8 +169,6 @@ DataThreadPluginEditor::~DataThreadPluginEditor()
 {
     sampleRateSelector->removeListener (this);
     voltageRangeSelector->removeListener (this);
-    diTimeButton->removeListener (this);
-    digitalHoldbackButton->removeListener (this);
     for (auto& button : analogButtons)
         if (button) button->removeListener (this);
     for (auto& button : digitalButtons)
@@ -211,13 +177,6 @@ DataThreadPluginEditor::~DataThreadPluginEditor()
 
 void DataThreadPluginEditor::refreshControls()
 {
-    diTimeButton->setButtonText (
-        thread->getDIObservationPhase() == DataThreadPlugin::DIObservationPhase::Midpoint
-            ? "MID" : "END");
-    diTimeButton->setEnabled (! CoreServices::getAcquisitionStatus());
-    digitalHoldbackButton->setButtonText (
-        thread->getDigitalHoldbackMs() == 0 ? "HOLD OFF" : "HOLD 1ms");
-    digitalHoldbackButton->setEnabled (! CoreServices::getAcquisitionStatus());
     const int analogCount = (std::max) (0, (std::min) (8, thread->getAnalogInputCount()));
     const int digitalCount = (std::max) (0, (std::min) (8, thread->getDigitalInputCount()));
     for (int channel = 0; channel < 8; ++channel)
@@ -287,24 +246,6 @@ void DataThreadPluginEditor::comboBoxChanged (juce::ComboBox* box)
 
 void DataThreadPluginEditor::buttonClicked (juce::Button* button)
 {
-    if (button == digitalHoldbackButton.get())
-    {
-        const int next = thread->getDigitalHoldbackMs() == 0
-            ? MCDAQDigitalHoldback::experimentalDelayMs : 0;
-        thread->setDigitalHoldbackMs (next);
-        refreshControls(); // No signal-chain rebuild: output-only option.
-        return;
-    }
-    if (button == diTimeButton.get())
-    {
-        const auto next = thread->getDIObservationPhase() ==
-            DataThreadPlugin::DIObservationPhase::Midpoint
-            ? DataThreadPlugin::DIObservationPhase::ReadEnd
-            : DataThreadPlugin::DIObservationPhase::Midpoint;
-        thread->setDIObservationPhase (next);
-        refreshControls(); // No signal-chain rebuild for this digital-only choice.
-        return;
-    }
     for (int channel = 0; channel < 8; ++channel)
     {
         if (button != analogButtons[static_cast<std::size_t> (channel)].get())
@@ -343,8 +284,6 @@ void DataThreadPluginEditor::saveCustomParametersToXml (XmlElement* xml)
     xml->setAttribute ("sample_rate_hz", static_cast<int> (thread->getSampleRateHz()));
     xml->setAttribute ("ai_channel_mask", static_cast<int> (thread->getChannelMask()));
     xml->setAttribute ("di_channel_mask", static_cast<int> (thread->getDigitalMask()));
-    xml->setAttribute ("di_observation_phase", static_cast<int> (thread->getDIObservationPhase()));
-    xml->setAttribute ("di_holdback_ms", thread->getDigitalHoldbackMs());
     xml->setAttribute ("input_range_volts", thread->getVoltageRangeVolts());
 }
 
@@ -362,13 +301,8 @@ void DataThreadPluginEditor::loadCustomParametersFromXml (XmlElement* xml)
     thread->setChannelMask (static_cast<std::uint8_t> (channelMask));
     thread->setDigitalMask (static_cast<std::uint8_t> (
         xml->getIntAttribute ("di_channel_mask", 0)));
-    const int holdbackMs = xml->getIntAttribute ("di_holdback_ms", 0);
-    thread->setDigitalHoldbackMs (
-        holdbackMs == MCDAQDigitalHoldback::experimentalDelayMs ? holdbackMs : 0);
-    const int phase = xml->getIntAttribute ("di_observation_phase", 0);
-    thread->setDIObservationPhase (
-        phase == 1 ? DataThreadPlugin::DIObservationPhase::ReadEnd
-                   : DataThreadPlugin::DIObservationPhase::Midpoint);
+    // Ignore legacy di_observation_phase/di_holdback_ms attributes from
+    // experimental versions. END + 1 ms is fixed in the acquisition source.
     thread->setSampleRateHz (xml->getIntAttribute ("sample_rate_hz", 1000));
     thread->setVoltageRangeVolts (xml->getIntAttribute ("input_range_volts", 10));
     refreshControls();

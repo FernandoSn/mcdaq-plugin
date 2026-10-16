@@ -73,12 +73,6 @@ public:
     std::uint8_t getDigitalMask() const noexcept { return selectedDigitalMask; }
     bool isDigitalEnabled (int channel) const noexcept;
     bool setDigitalMask (std::uint8_t mask);
-    using DIObservationPhase = MCDAQDigitalTimeline::ObservationPhase;
-    DIObservationPhase getDIObservationPhase() const noexcept { return selectedDIObservationPhase; }
-    bool setDIObservationPhase (DIObservationPhase phase);
-    // Output-only staging. OFF (default) or 1ms; never changes ADC sampling.
-    int getDigitalHoldbackMs() const noexcept { return selectedDigitalHoldbackMs; }
-    bool setDigitalHoldbackMs (int delayMs);
     bool isChannelEnabled (int channel) const noexcept;
     std::vector<int> getSelectedChannels() const;
     bool setChannelMask (std::uint8_t mask);
@@ -134,13 +128,10 @@ public:
 private:
     std::unique_ptr<MCDAQDeviceManager> deviceManager;
     std::unique_ptr<MCDAQAcquisition> acquisition;
-    unsigned int diagnosticTicks = 0;
     long selectedSampleRateHz = 1000;
     int selectedChannelCount = 1;
     std::uint8_t selectedChannelMask = 0x01; // AI0 initially enabled.
     std::uint8_t selectedDigitalMask = 0x00; // All DI inputs opt-in.
-    DIObservationPhase selectedDIObservationPhase = DIObservationPhase::Midpoint; // v3 default.
-    int selectedDigitalHoldbackMs = 0; // OFF: direct v3 forwarding.
     int selectedRangeVolts = 10;
     double activeSampleRateHz = 1000.0;
 
@@ -172,7 +163,8 @@ private:
     // Digital-only relative-clock estimator (fed by existing MCC callbacks).
     // Does not affect the analog rate used for sample timestamps/metadata.
     MCDAQDigitalClockEstimator digitalClockEstimator;
-    // Bounded output-only native ADC queue; owned/used by consumer worker.
+    // Fixed 1 ms output holdback when DI is active; bypass when no DI is selected.
+    // Does not change ADC hardware, raw data, original frames or timestamps.
     MCDAQDigitalHoldback digitalHoldback;
     std::thread digitalPollThread;
     std::atomic<bool> digitalPollStop { true };

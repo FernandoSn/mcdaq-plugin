@@ -20,10 +20,8 @@ public:
     using Clock = std::chrono::steady_clock;
     using TimePoint = Clock::time_point;
 
-    // Experimental hypothesis about when the USB AUXPORT value was sampled.
-    // MIDPOINT retains the original v3 estimate; READ_END uses the host time
-    // immediately after cbDIn returns. Neither is a hardware timestamp.
-    enum class ObservationPhase : std::uint8_t { Midpoint = 0, ReadEnd = 1 };
+    // cbDIn completion is the fixed observation timestamp. This is a host
+    // software timestamp, NOT a hardware-latched timestamp.
 
     struct Diagnostics
     {
@@ -43,11 +41,9 @@ public:
     void reset (std::uint8_t selectedMask,
                 std::uint8_t initialPortValue,
                 double rateHz,
-                TimePoint approximateAnalogStart,
-                ObservationPhase observationPhase = ObservationPhase::Midpoint)
+                TimePoint approximateAnalogStart)
     {
         std::lock_guard<std::mutex> lock (mutex_);
-        observationPhase_ = observationPhase;
         enabledMask_ = selectedMask;
         observedState_ = initialPortValue & enabledMask_;
         emittedState_ = observedState_;
@@ -62,19 +58,16 @@ public:
         diagnostics_ = {};
     }
 
-    // A digital transition occurred between two observed port states.
-    // Map each read to the selected host-side observation time, then assign
-    // the midpoint between two observations. The v3 default is the midpoint
-    // of each cbDIn call. Experimental READ_END uses its completion instead.
-    // Neither mode can recover the actual unlatched electrical edge.
+    // A transition occurred between two port observations. Timestamp each
+    // observation at cbDIn completion (END); interpolate the edge halfway
+    // between adjacent observations. The actual electrical edge is unlatched.
     void observe (std::uint8_t rawPortValue, TimePoint readBegin, TimePoint readEnd)
     {
         std::lock_guard<std::mutex> lock (mutex_);
         ++diagnostics_.observations;
         if (readEnd < readBegin)
             return;
-        const TimePoint observationTime = observationPhase_ == ObservationPhase::ReadEnd
-            ? readEnd : readBegin + (readEnd - readBegin) / 2;
+        const TimePoint observationTime = readEnd;
         const TimePoint previousTime = previousPollTime_;
         previousPollTime_ = observationTime;
         const std::uint8_t next = rawPortValue & enabledMask_;
@@ -175,7 +168,6 @@ private:
     static constexpr std::size_t maxQueuedTransitions = 8192;
     mutable std::mutex mutex_;
     std::deque<Change> queue_;
-    ObservationPhase observationPhase_ = ObservationPhase::Midpoint;
     std::uint8_t enabledMask_ = 0;
     std::uint8_t observedState_ = 0;
     std::uint8_t emittedState_ = 0;

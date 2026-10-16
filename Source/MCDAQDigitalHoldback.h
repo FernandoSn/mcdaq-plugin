@@ -1,6 +1,6 @@
 #pragma once
 
-// EXPERIMENTAL. Stages *copies* of already-acquired native ADC samples for a
+// Stages *copies* of already-acquired native ADC samples for a
 // bounded number of hardware-clock frames, giving the independent USB DI poller
 // time to observe transitions before SourceNode converts per-sample TTL levels
 // to events. NEVER changes the ADC clock, original sample numbers, or raw data.
@@ -8,7 +8,8 @@
 // In particular, this is NOT a retroactive Open Ephys event injection API:
 // SourceNode::process() constructs events from TTL level words while reading
 // the corresponding DataBuffer samples, so events cannot be backdated after
-// that point. This opt-in staging adds stream latency. Keep OFF by default.
+// that point. Fixed 1 ms holdback is used whenever DI channels are selected.
+// With no DI channels selected, direct output bypasses this queue.
 //
 // Header-only, independent of JUCE and MCC, tested with a fake OE sink.
 #include <algorithm>
@@ -23,7 +24,7 @@
 class MCDAQDigitalHoldback
 {
 public:
-    static constexpr int experimentalDelayMs = 1;
+    static constexpr int digitalDelayMs = 1;
     static constexpr std::size_t maxStagedPoints = 262144;
 
     struct Diagnostics
@@ -49,7 +50,7 @@ public:
         haveNextPoint_ = false;
         expectedNextPoint_ = 0;
         newestFrameEnd_ = 0;
-        enabled_ = delayMs == experimentalDelayMs && channels > 0 &&
+        enabled_ = delayMs == digitalDelayMs && channels > 0 &&
                    std::isfinite (framesPerSecond) && framesPerSecond > 0.0;
         if (enabled_)
         {
