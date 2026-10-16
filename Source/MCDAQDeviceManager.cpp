@@ -61,6 +61,8 @@ struct MCDAQDeviceManager::Impl
     int selectedBoardNumber = -1;
     std::string selectedProductName;
     std::string selectedUniqueId;
+    // If a rollback UL release fails, keep ownership until destruction.
+    std::vector<int> rollbackBoardNumbers;
 };
 
 // ============================================================
@@ -75,6 +77,11 @@ MCDAQDeviceManager::MCDAQDeviceManager()
 MCDAQDeviceManager::~MCDAQDeviceManager()
 {
     releaseSelection();
+    // Only expected if UL rejected a rare transactional-switch rollback.
+    std::lock_guard<std::mutex> lock (reservationMutex());
+    for (int boardNum : impl_->rollbackBoardNumbers)
+        if (cbReleaseDaqDevice (boardNum) == 0)
+            reservedBoardNumbers().erase (boardNum);
 }
 
 // ============================================================
@@ -227,6 +234,94 @@ bool MCDAQDeviceManager::selectFirstAvailableBoard()
     }
 
     return false;
+}
+
+
+bool MCDAQDeviceManager::isDeviceSelectable (const std::string& uniqueId) const
+{
+    std::lock_guard<std::mutex> lock (reservationMutex());
+    if (uniqueId.empty()) return false;
+    if (impl_->selectedBoardNumber >= 0 && impl_->selectedUniqueId == uniqueId)
+        return true;
+
+    for (std::size_t i = 0; i < impl_->devices.size(); ++i)
+    {
+        const auto& device = impl_->devices[i];
+        if (device.uniqueId != uniqueId ||
+            (device.productName != "USB-204" && device.productName != "USB-1608FS-Plus"))
+            continue;
+        return cbGetBoardNumber (impl_->descriptors[i]) < 0;
+    }
+    return false;
+}
+
+bool MCDAQDeviceManager::selectBoardByUniqueId (const std::string& uniqueId)
+{
+    std::lock_guard<std::mutex> lock (reservationMutex());
+    if (uniqueId.empty()) return false;
+    if (impl_->selectedBoardNumber >= 0 && impl_->selectedUniqueId == uniqueId)
+        return true;
+
+    // The refreshed inventory is immutable while a board is reserved.
+    // A unique ID must identify exactly one supported physical device.
+    std::size_t target = impl_->devices.size();
+    for (std::size_t i = 0; i < impl_->devices.size(); ++i)
+    {
+        const auto& device = impl_->devices[i];
+        if (device.uniqueId == uniqueId &&
+            (device.productName == "USB-204" || device.productName == "USB-1608FS-Plus"))
+        {
+            if (target != impl_->devices.size()) return false;
+            target = i;
+        }
+    }
+    if (target == impl_->devices.size()) return false;
+    const auto& descriptor = impl_->descriptors[target];
+
+    // A selected device in another MCDAQ instance (or any UL owner) cannot
+    // be stolen. Both create and release are serialized across instances.
+    if (cbGetBoardNumber (descriptor) >= 0) return false;
+
+    // Register the replacement FIRST, so failure does not drop the running
+    // configuration's currently selected board. Registering is permitted only
+    // while its analog acquisition is stopped (enforced by DataThreadPlugin).
+    int newBoard = -1;
+    for (int candidate = 0; candidate <= 99; ++candidate)
+    {
+        if (reservedBoardNumbers().count (candidate) != 0) continue;
+        if (cbCreateDaqDevice (candidate, descriptor) == 0)
+        {
+            newBoard = candidate;
+            reservedBoardNumbers().insert (candidate);
+            break;
+        }
+    }
+    if (newBoard < 0) return false;
+
+    const int oldBoard = impl_->selectedBoardNumber;
+    if (oldBoard >= 0 && cbReleaseDaqDevice (oldBoard) != 0)
+    {
+        // Roll back selection. If UL even refuses rollback, reserve the new
+        // number and retain it for a later cleanup; never allow number reuse.
+        if (cbReleaseDaqDevice (newBoard) == 0)
+            reservedBoardNumbers().erase (newBoard);
+        else
+            impl_->rollbackBoardNumbers.push_back (newBoard);
+        return false;
+    }
+
+    if (oldBoard >= 0)
+    {
+        reservedBoardNumbers().erase (oldBoard);
+        for (auto& device : impl_->devices)
+            if (device.boardNumber == oldBoard) device.boardNumber = -1;
+    }
+
+    impl_->selectedBoardNumber = newBoard;
+    impl_->selectedProductName = impl_->devices[target].productName;
+    impl_->selectedUniqueId = uniqueId;
+    impl_->devices[target].boardNumber = newBoard;
+    return true;
 }
 
 

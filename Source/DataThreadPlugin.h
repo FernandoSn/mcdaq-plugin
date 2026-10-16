@@ -80,6 +80,18 @@ public:
     int getVoltageRangeVolts() const noexcept { return selectedRangeVolts; }
     bool canSelectVoltageRange() const;
     bool setVoltageRangeVolts (int fullScaleVolts);
+    // Hardware assignment is separate from AI/DI and clock configuration.
+    struct BoardChoice
+    {
+        std::string name;
+        std::string uniqueId;
+        bool selectable = false; // false if reserved by another instance.
+    };
+    std::vector<BoardChoice> getBoardChoices() const;
+    std::string getSelectedBoardUniqueId() const;
+    bool selectBoardByUniqueId (const std::string& uniqueId);
+    // XML restoration must not silently record on a different board.
+    bool restoreBoardByUniqueId (const std::string& uniqueId);
     std::string getBoardName() const;
     std::vector<long> getAvailableRates() const;
     bool isSimultaneousSampling() const;
@@ -128,6 +140,9 @@ public:
 private:
     std::unique_ptr<MCDAQDeviceManager> deviceManager;
     std::unique_ptr<MCDAQAcquisition> acquisition;
+    // Refuse to acquire on an accidental auto-assigned device if restoring
+    // a saved physical board failed (including an exceptional UL release failure).
+    std::string unresolvedRequiredBoardId;
     long selectedSampleRateHz = 1000;
     int selectedChannelCount = 1;
     std::uint8_t selectedChannelMask = 0x01; // AI0 initially enabled.

@@ -107,7 +107,8 @@ DataThreadPlugin::~DataThreadPlugin()
 
 bool DataThreadPlugin::foundInputSource()
 {
-    return deviceManager && deviceManager->getSelectedBoardNumber() >= 0 &&
+    return deviceManager && unresolvedRequiredBoardId.empty() &&
+           deviceManager->getSelectedBoardNumber() >= 0 &&
            deviceManager->getSelectedScanCapabilities().supported;
 }
 
@@ -201,6 +202,81 @@ int DataThreadPlugin::getAnalogInputCount() const
 int DataThreadPlugin::getDigitalInputCount() const
 {
     return deviceManager ? deviceManager->getSelectedScanCapabilities().digitalChannels : 0;
+}
+
+std::vector<DataThreadPlugin::BoardChoice> DataThreadPlugin::getBoardChoices() const
+{
+    std::vector<BoardChoice> choices;
+    if (! deviceManager) return choices;
+    for (const auto& device : deviceManager->getDevices())
+    {
+        if (device.productName != "USB-204" && device.productName != "USB-1608FS-Plus")
+            continue;
+        choices.push_back ({ device.productName, device.uniqueId,
+                             deviceManager->isDeviceSelectable (device.uniqueId) });
+    }
+    return choices;
+}
+
+std::string DataThreadPlugin::getSelectedBoardUniqueId() const
+{
+    return deviceManager ? deviceManager->getSelectedUniqueId() : std::string();
+}
+
+bool DataThreadPlugin::selectBoardByUniqueId (const std::string& uniqueId)
+{
+    if (! deviceManager || uniqueId.empty() ||
+        CoreServices::getAcquisitionStatus() || acquisition || isThreadRunning())
+        return false;
+    if (uniqueId == getSelectedBoardUniqueId())
+    {
+        unresolvedRequiredBoardId.clear(); // Deliberate selection by user.
+        return true;
+    }
+
+    if (! deviceManager->selectBoardByUniqueId (uniqueId))
+    {
+        LOGE ("MCDAQ: Cannot select board ID ", uniqueId.c_str(),
+              ". Device may be missing, reserved by another instance, or unavailable to UL. "
+              "Previous board assignment was preserved.");
+        return false;
+    }
+
+    // Everything downstream re-preflights on the new physical board. No
+    // acquisition, ADC callback, digital clock fit or holdback code changes.
+    if (getBoardName() == "USB-204") selectedRangeVolts = 10;
+    unresolvedRequiredBoardId.clear();
+    rateNegotiated = false;
+    negotiatedRateHz = 0;
+    negotiatedPreciseRateHz = 0.0;
+    negotiatedClockDivider = 0;
+    negotiatedBoardNum = -1;
+    LOGC ("MCDAQ: Board changed to ", getBoardName().c_str(),
+          " | ID: ", uniqueId.c_str(),
+          " | UL board: ", deviceManager->getSelectedBoardNumber(),
+          ". ADC stream settings and hardware clock will be revalidated.");
+    return true;
+}
+
+bool DataThreadPlugin::restoreBoardByUniqueId (const std::string& uniqueId)
+{
+    if (uniqueId.empty()) return false;
+    if (selectBoardByUniqueId (uniqueId)) return true;
+    unresolvedRequiredBoardId = uniqueId;
+
+    // No accidental silent fallback to the constructor's first enumerated
+    // board when a saved physical device is unplugged or already reserved.
+    if (deviceManager && ! CoreServices::getAcquisitionStatus() &&
+        ! acquisition && ! isThreadRunning())
+    {
+        deviceManager->releaseSelection();
+        rateNegotiated = false;
+        negotiatedPreciseRateHz = 0.0;
+        negotiatedBoardNum = -1;
+        LOGE ("MCDAQ: Saved board ID ", uniqueId.c_str(),
+              " is unavailable. Source registration is blocked until a board is selected.");
+    }
+    return false;
 }
 
 std::string DataThreadPlugin::getBoardName() const

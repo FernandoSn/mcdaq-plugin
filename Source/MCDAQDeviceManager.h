@@ -51,6 +51,15 @@ public:
     // Returns false if no suitable unreserved board exists.
     bool selectFirstAvailableBoard();
 
+    // Atomically switch to a discovered physical device by stable UniqueID.
+    // The existing board stays selected if the target is missing, reserved,
+    // cannot be registered, or the old registration cannot be released.
+    // Call only while acquisition is stopped.
+    bool selectBoardByUniqueId (const std::string& uniqueId);
+
+    // Reservation snapshot; UI only. Does not alter UL device registrations.
+    bool isDeviceSelectable (const std::string& uniqueId) const;
+
     // Release this instance's internal board reservation.
     void releaseSelection();
 
