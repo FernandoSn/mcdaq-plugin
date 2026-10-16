@@ -69,11 +69,11 @@ constexpr int analogButtonWidth = 54;
 constexpr int digitalButtonWidth = 46;
 constexpr int settingsX = 241;
 constexpr int settingsWidth = 195;
-constexpr int settingsTopOffset = 5;
+constexpr int settingsTopOffset = 3;
 // Keep the controls genuinely narrow: the exact-rate readout is separate
 // from the requested-rate ComboBox, rather than covering its arrow.
-constexpr int rateDropDownWidth = 108;
-constexpr int voltageDropDownWidth = 149;
+constexpr int rateDropDownWidth = 104;
+constexpr int voltageDropDownWidth = 145;
 constexpr int exactRateOffsetX = 116;
 constexpr int exactRateWidth = 77;
 } // namespace
@@ -105,16 +105,14 @@ DataThreadPluginEditor::DataThreadPluginEditor (GenericProcessor* parentNode,
                             firstRowY + (channel % 4) * channelRowPitch,
                             digitalButtonWidth, channelButtonHeight);
         digital->setTooltip ("Enable/disable TTL input DI" +
-            juce::String (channel) +
-            ". SOFTWARE-POLLED, not synchronized to the analog clock; "
-            "short pulses can be missed and event timestamps are approximate.");
+                             juce::String (channel));
         digital->addListener (this);
         addAndMakeVisible (*digital);
         digitalButtons[static_cast<std::size_t> (channel)] = std::move (digital);
     }
 
     boardSelector = std::make_unique<juce::ComboBox> ("MCDAQ physical board");
-    boardSelector->setBounds (settingsX, 24 + settingsTopOffset, settingsWidth, 19);
+    boardSelector->setBounds (settingsX, 25 + settingsTopOffset, settingsWidth, 18);
     boardSelector->setTextWhenNothingSelected ("Select MCC board...");
     boardSelector->setTooltip ("Choose the physical MCC USB device. "
         "Only change it while acquisition is stopped; the unique ID is saved with the configuration.");
@@ -123,12 +121,12 @@ DataThreadPluginEditor::DataThreadPluginEditor (GenericProcessor* parentNode,
 
     sampleRateLabel = std::make_unique<juce::Label>();
     sampleRateLabel->setText ("SAMPLE RATE / CHANNEL", juce::dontSendNotification);
-    sampleRateLabel->setBounds (settingsX, 41 + settingsTopOffset, settingsWidth, 13);
+    sampleRateLabel->setBounds (settingsX, 46 + settingsTopOffset, settingsWidth, 13);
     sampleRateLabel->setFont (juce::Font (10.0f));
     addAndMakeVisible (*sampleRateLabel);
 
     sampleRateSelector = std::make_unique<juce::ComboBox> ("MCDAQ sample rate");
-    sampleRateSelector->setBounds (settingsX + 2, 55 + settingsTopOffset, rateDropDownWidth, 22);
+    sampleRateSelector->setBounds (settingsX + 2, 58 + settingsTopOffset, rateDropDownWidth, 20);
     sampleRateSelector->addListener (this);
     addAndMakeVisible (*sampleRateSelector);
 
@@ -137,7 +135,7 @@ DataThreadPluginEditor::DataThreadPluginEditor (GenericProcessor* parentNode,
     // This avoids covering the ComboBox arrow and lets the parentheses remain
     // easily readable at a smaller font than the selected rate.
     exactRateLabel = std::make_unique<juce::Label>();
-    exactRateLabel->setBounds (settingsX + exactRateOffsetX, 57 + settingsTopOffset, exactRateWidth, 18);
+    exactRateLabel->setBounds (settingsX + exactRateOffsetX, 59 + settingsTopOffset, exactRateWidth, 17);
     exactRateLabel->setFont (juce::Font (12.0f));
     exactRateLabel->setBorderSize (juce::BorderSize<int> (0));
     exactRateLabel->setColour (juce::Label::textColourId,
@@ -148,12 +146,12 @@ DataThreadPluginEditor::DataThreadPluginEditor (GenericProcessor* parentNode,
 
     voltageRangeLabel = std::make_unique<juce::Label>();
     voltageRangeLabel->setText ("AI VOLTAGE RANGE", juce::dontSendNotification);
-    voltageRangeLabel->setBounds (settingsX, 78 + settingsTopOffset, settingsWidth, 12);
+    voltageRangeLabel->setBounds (settingsX, 82 + settingsTopOffset, settingsWidth, 12);
     voltageRangeLabel->setFont (juce::Font (10.0f));
     addAndMakeVisible (*voltageRangeLabel);
 
     voltageRangeSelector = std::make_unique<juce::ComboBox> ("MCDAQ voltage range");
-    voltageRangeSelector->setBounds (settingsX + 2, 91 + settingsTopOffset, voltageDropDownWidth, 21);
+    voltageRangeSelector->setBounds (settingsX + 2, 93 + settingsTopOffset, voltageDropDownWidth, 20);
     for (const int range : { 10, 5, 2, 1 })
         voltageRangeSelector->addItem (
             "-" + juce::String (range) + " to +" + juce::String (range) + " V", range);
@@ -161,10 +159,10 @@ DataThreadPluginEditor::DataThreadPluginEditor (GenericProcessor* parentNode,
     addAndMakeVisible (*voltageRangeSelector);
 
     architectureLabel = std::make_unique<juce::Label>();
-    architectureLabel->setBounds (settingsX, 112 + settingsTopOffset, 106, 12);
-    architectureLabel->setFont (juce::Font (9.0f));
+    architectureLabel->setBounds (settingsX, 113 + settingsTopOffset, 106, 12);
+    architectureLabel->setFont (juce::Font (10.0f));
     architectureLabel->setTooltip (
-        "SIM = simultaneous ADCs; MUX = multiplexed ADC; DI is software-polled.");
+        "SIM = simultaneous ADCs; MUX = multiplexed ADC.");
     addAndMakeVisible (*architectureLabel);
 
     refreshControls();
