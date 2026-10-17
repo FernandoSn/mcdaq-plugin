@@ -39,12 +39,11 @@ using namespace Plugin;
 
 extern "C" EXPORT void getLibInfo (Plugin::LibraryInfo* info)
 {
-    /* API version, defined by the GUI source.
-	Should not be changed to ensure it is always equal to the one used in the latest codebase.
-	The GUI refuses to load plugins with mismatched API versions */
+    // Build against the matching Open Ephys GUI Plugin API header.
+    // The GUI refuses to load plugins built against a different API. 
     info->apiVersion = PLUGIN_API_VER;
-    info->name = "MCDAQ"; // <---- update
-    info->libVersion = "0.1.0"; // <---- update
+    info->name = "MCDAQ";
+    info->libVersion = "0.9.0-rc.1";
     info->numPlugins = NUM_PLUGINS;
 }
 
@@ -52,12 +51,12 @@ extern "C" EXPORT int getPluginInfo (int index, Plugin::PluginInfo* info)
 {
     switch (index)
     {
-            //one case per plugin. This example is for a processor which connects directly to the signal chain
+            // One data-thread source plugin: MCC analog and software-polled digital inputs.
         case 0:
 
             info->type = Plugin::Type::DATA_THREAD;
-            info->dataThread.name = "MCDAQ"; // <---- update
-            info->dataThread.creator = &createDataThread<DataThreadPlugin>; // <---- update
+            info->dataThread.name = "MCDAQ";
+            info->dataThread.creator = &createDataThread<DataThreadPlugin>;
             break;
 
         default:
