@@ -1,63 +1,76 @@
-# Data Thread Plugin Template
+# MCDAQ — Open Ephys source plugin
 
-This repository contains a template for building **Data Thread** plugins for the [Open Ephys GUI](https://github.com/open-ephys/plugin-GUI). Data Thread plugins typically communicate with an external piece of hardware with an acquisition clock that is not synchronized with the GUI's signal processing callbacks. Examples of commonly used Data Thread plugins include [Neuropixels PXI](https://github.com/open-ephys-plugins/neuropixels-pxi) and the [Acquisition Board](https://github.com/open-ephys-plugins/acquisition-board).
+**Version:** `0.9.0-rc.1` (Stage 2 release candidate; **not** a validated stable public binary)  
+**Target:** Open Ephys GUI **v1.1.0**, Plugin API **10**, Windows **x64**  
+**Hardware tested:** Measurement Computing **USB-204** and **USB-1608FS-Plus** with MCC **Universal Library Rev 33**.
 
-A simpler example that does not require physical hardware: [Source Sim](https://github.com/open-ephys-plugins/source-sim).
+MCDAQ adds MCC USB analog input streaming and software-polled digital inputs to the Open Ephys GUI. The work modernizes a 2019 MCDAQ plugin. The implementation includes hardware-board selection by unique ID, multiple MCDAQ instances, multichannel acquisition, native ADC point handling, and a separate digital-input polling/clock-modeling path.
 
-Information on the Open Ephys Plugin API can be found on [the GUI's documentation site](https://open-ephys.github.io/gui-docs/Developer-Guide/Open-Ephys-Plugin-API.html).
+## Installation for users
 
-## Creating a new Data Thread Plugin
+1. Install **Open Ephys GUI v1.1.0 x64** and the correct **Measurement Computing Universal Library** with device drivers and InstaCal. Verify both boards in InstaCal.
+2. Obtain a Release **x64** `mcdaq-plugin.dll` built against GUI v1.1.0 / Plugin API 10; copy it into the **plugin directory actually used by your installation** (normally `C:\ProgramData\Open Ephys\plugins-api10\`). Do not install another copy elsewhere at the same time.
+3. Ensure the matching **`cbw64.dll` from the installed UL distribution** is discoverable by the GUI; one common shared runtime directory is `C:\ProgramData\Open Ephys\shared-api10\`. Prefer the same vendor UL version and verify loading rather than replacing system DLLs indiscriminately.
+4. Restart Open Ephys, add **MCDAQ** under Sources, and select the physical board. Use two instances for two boards. Attach Record Nodes to capture data.
+5. Test acquisition with a short unimportant recording before experiments. Inspect the activity log for `Possible data loss`, scan errors, and final produced/consumed/delivered counts.
 
-1. Click "Use this template" to instantiate a new repository under your GitHub account. 
-2. Clone the new repository into a directory at the same level as the `plugin-GUI` repository. This is typically named `OEPlugins`, but it can have any name you'd like.
-3. Modify the [OpenEphysLib.cpp file](https://open-ephys.github.io/gui-docs/Developer-Guide/Creating-a-new-plugin.html) to include your plugin's name and version number.
-4. Create the plugin [build files](https://open-ephys.github.io/gui-docs/Developer-Guide/Compiling-plugins.html) using CMake.
-5. Use Visual Studio (Windows), Xcode (macOS), or `make` (Linux) to compile the plugin.
-6. Edit the code to add custom functionality, and add additional source files as needed.
+**This source archive does not contain** the Windows plugin DLL, MCC header/import libraries, `cbw64.dll`, UL installer, or USB drivers. There is **no prebuilt installer** in this release candidate. The user's existing tested DLL may still be the version from before metadata cleanup; rebuilding is required for the new version string.
 
-## Repository structure
+## Features / limits
 
-This repository contains 3 top-level directories:
+| Feature | Implemented |
+|---|---|
+| Supported boards | USB-204 (multiplexed ADC); USB-1608FS-Plus (simultaneous ADC) |
+| Analog inputs | Select AI0–AI7 independently, at least one enabled |
+| User-requested rates | 500, 1,000, 2,000, 5,000, 10,000, 25,000, 30,000 Hz **per channel** (subject to board/channel limits) |
+| Voltage range | USB-204 fixed +/-10 V; USB-1608FS-Plus configurable per shared board range |
+| Digital inputs | Select DI0–DI7; software-polled (not ADC-clock-synchronous) |
+| Two-board operation | Two MCDAQ plugin instances, each reserving one distinct physical board |
+| Configuration | Saves/restores unique hardware IDs and channel/rate/range settings |
+| GUI | Channel, board, rate, and range controls locked during acquisition/recording |
 
-- `Build` - Plugin build files will be auto-generated here. These files will be ignored in all `git` commits.
-- `Source` - All plugin source files (`.h` and `.cpp`) should live here. There can be as many source code sub-directories as needed.
-- `Resources` - This is where you should store any non-source-code files, such as library files or scripts.
+### Critical timing details
 
-## Using external libraries
+- **Analog streams:** The DLL uses MCC background continuous scans, preserves integer ADC samples, and reports nominal sample rates derived from validated pacer-divider behavior. The nominal clock model assumes the tested UL/firmware behavior and does **not** calibrate the physical oscillator against an external time standard. USB-204 and USB-1608FS-Plus have different pacer logic.
+- **Digital inputs:** `cbDIn` is **software-polled**, typically many milliseconds between completed reads. Short pulses can be missed, and reported TTL edges are approximate. END timestamps and midpoint edge interpolation are used; a fixed **1 ms whole-ADC-block holdback** is applied when DI is enabled to reduce late event placement. **Not suitable as a hardware timestamping or tight closed-loop substitute.**
+- **Two boards are not synchronized:** Two MCDAQ instances can record concurrently but each uses its own ADC clock. No cross-board phase lock, shared time zero, or drift compensation is guaranteed. Use and validate an external common sync signal before drawing millisecond-scale cross-board conclusions.
+- **Error handling:** Acquisition logs include explicit loss/error counters. A failure of hardware stop/release may require a restart of Open Ephys or USB reinitialization; test unplug/error paths separately before public use.
+- **Annotations:** Built-in Open Ephys Message Center already provides timestamped text notes when events are recorded; MCDAQ does not implement another notes subsystem.
 
-To link the plugin to external libraries, it is necessary to manually edit the Build/CMakeLists.txt file. The code for linking libraries is located in comments at the end.
-For most common libraries, the `find_package` option is recommended. An example would be
+## Building on Windows (developers)
 
-```cmake
-find_package(ZLIB)
-target_link_libraries(${PLUGIN_NAME} ${ZLIB_LIBRARIES})
-target_include_directories(${PLUGIN_NAME} PRIVATE ${ZLIB_INCLUDE_DIRS})
+1. Obtain and **build Open Ephys GUI v1.1.0 x64** from the `plugin-GUI` repository using Visual Studio/CMake.
+2. Install MCC UL Rev 33 SDK and locate `cbw.h` and the **x64 import library** supplied with that installation (commonly `cbw64.lib`; use the real path/filename from your SDK).
+3. Configure this repository with CMake and the same Visual Studio generator/architecture as the GUI. For example, from a PowerShell session in the MCDAQ repository folder:
+
+```powershell
+cmake -S . -B Build -G "Visual Studio 17 2022" -A x64 `
+  -DGUI_BASE_DIR="C:/path/to/plugin-GUI" `
+  -DUL_INCLUDE_DIR="C:/path/to/MCC/include" `
+  -DUL_LIBRARY="C:/path/to/MCC/lib/x64/cbw64.lib"
+cmake --build Build --config Release
 ```
 
-If there is no standard package finder for cmake, `find_library`and `find_path` can be used to find the library and include files respectively. The commands will search in a variety of standard locations For example
+Use your actual Visual Studio generator if different. CMake's `INSTALL` target copies the DLL into the GUI build runtime's `plugins` folder (rather than into ProgramData), following the template. `cbw64.dll` must still be present at runtime. If you already have a working local Open Ephys CMake project, you may instead **replace only its 13 source files** with those under `Source/`, keeping your proven local CMake/SDK wiring. This is the lowest-risk way to rebuild this candidate.
 
-```cmake
-find_library(ZMQ_LIBRARIES NAMES libzmq-v120-mt-4_0_4 zmq zmq-v120-mt-4_0_4) #the different names after names are not a list of libraries to include, but a list of possible names the library might have, useful for multiple architectures. find_library will return the first library found that matches any of the names
-find_path(ZMQ_INCLUDE_DIRS zmq.h)
+This CMakeLists was adapted from the [official data-thread template](https://github.com/open-ephys-plugins/data-thread-template). Its full Windows hardware build has **not been run in this packaging environment**, so check its linker/SDK path settings against your working setup.
 
-target_link_libraries(${PLUGIN_NAME} ${ZMQ_LIBRARIES})
-target_include_directories(${PLUGIN_NAME} PRIVATE ${ZMQ_INCLUDE_DIRS})
+## Tests
+
+On a machine with Python 3 and `g++` or `clang++` (including MSYS2/MinGW on Windows):
+
+```sh
+python tests/run_regression_tests.py
 ```
 
-### Providing libraries for Windows
+This runs MCC device-manager mock tests, clock estimator and timeline tests, analog-holdback integration tests, and static editor regression checks. No MCC board or Open Ephys GUI is required. Passing these **does not prove** successful Windows GUI compilation or hardware behavior.
 
-Since Windows does not have standardized paths for libraries, as Linux and macOS do, it is sometimes useful to pack the appropriate Windows version of the required libraries alongside the plugin.
-To do so, a _libs_ directory has to be created **at the top level** of the repository, alongside this README file, and files from all required libraries placed there. The required folder structure is:
+See `docs/RELEASE_CHECKLIST.md` for the final Windows/hardware acceptance list and `docs/SOURCE_FREEZE_SHA256.json` for exact baseline file digests.
 
-```
-    libs
-    ├─ include           #library headers
-    ├─ lib
-        ├─ x64           #64-bit compile-time (.lib) files
-        └─ x86           #32-bit compile time (.lib) files, if needed
-    └─ bin
-        ├─ x64           #64-bit runtime (.dll) files
-        └─ x86           #32-bit runtime (.dll) files, if needed
-```
+## License and attribution
 
-DLLs in the bin directories will be copied to the open-ephys GUI _shared_ folder when installing.
+The supplied source incorporates Open Ephys Data Thread template code with preserved GNU General Public License v3-or-later notices. See `LICENSE` (GPLv3 text) and `NOTICE.md`. MCC Universal Library, MCC drivers, and Open Ephys are separate dependencies. **No vendor MCC binary/header/library is redistributed here.** Check the relevant SDK/redistribution terms before distributing binaries that bundle vendor components.
+
+## Release status
+
+`0.9.0-rc.1` denotes a **source release candidate**. Final Windows compilation, error-path robustness checks, and a hardware smoke test on both boards are required before promoting to `1.0.0`.
